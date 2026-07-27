@@ -5,6 +5,9 @@ from feature_extraction.face.yunet_face_detector import YuNetFaceDetector, DEFAU
 
 Branch = Literal["ID", "REID"]
 
+# Umbral mínimo permisivo para intentar la rama facial (evita conmutar a Re-ID prematuramente)
+MIN_FACE_ROUTING_CONF = 0.40
+
 _face_detector: YuNetFaceDetector | None = None
 
 
@@ -15,14 +18,15 @@ def _get_face_detector() -> YuNetFaceDetector:
     return _face_detector
 
 
-def route_branch(body_roi: np.ndarray, conf_threshold: float = DEFAULT_FACE_CONF_THRESHOLD) -> tuple[Branch, float]:
+def route_branch(body_roi: np.ndarray, conf_threshold: float = MIN_FACE_ROUTING_CONF) -> tuple[Branch, float]:
     """
     Determina la rama activa (ID o REID) según la visibilidad facial [REQ-RID-01].
-    Devuelve (rama, confianza_facial).
+    Si hay una detección facial con confianza >= 0.40, utiliza la rama ID (dejando que el
+    motor de decisión y el gatekeeper validen la certeza).
     """
     detector = _get_face_detector()
     result = detector.detect(body_roi)
 
     if result.detected and result.confidence >= conf_threshold:
         return "ID", result.confidence
-    return "REID", result.confidence
+    return "REID", result.confidence

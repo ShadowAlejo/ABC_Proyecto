@@ -1,5 +1,5 @@
 video:
-  source: "dataset/raw_videos/camara2.mp4"  # o 0 para cámara
+  source: "dataset/raw_videos/videos_prueba/camara_02.mp4"  # o 0 para cámara
   target_fps: 15
 
 detection:

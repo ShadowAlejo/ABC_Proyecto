@@ -4,21 +4,18 @@
 # ============================================================
 
 # ------------------------------------------------------------
-# Entorno virtual (~1 GB) — se reconstruye con requirements.txt
+# Entorno virtual y temporales de Python
 # ------------------------------------------------------------
 venv/
 .venv/
 env/
 ENV/
-
-# ------------------------------------------------------------
-# Python
-# ------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+*.dll
+*.pyd
 build/
 dist/
 *.egg-info/
@@ -31,22 +28,38 @@ htmlcov/
 .ipynb_checkpoints/
 
 # ------------------------------------------------------------
-# Dataset: material multimedia (~3.1 GB)
-# Contiene rostros de personas reales — no debe publicarse.
-# camara_04.mp4 (127 MB) además excede el límite de 100 MB/archivo
-# que GitHub rechaza en el push.
+# Carpetas temporales y clones locales
 # ------------------------------------------------------------
-dataset/raw_images/
-dataset/raw_videos/
-dataset/processed/
-dataset/captures/
-dataset/hard_negatives/
+_yolox_tmp/
+YOLOX/
+tmp/
+scratch/
+.gemini/
+.antigravity/
 
-# Formatos multimedia en cualquier ubicación (red de seguridad)
+# ------------------------------------------------------------
+# Datasets y archivos multimedia
+# (Ignora contenido de las carpetas conservando los .gitkeep)
+# ------------------------------------------------------------
+dataset/raw_images/*
+dataset/raw_videos/*
+dataset/processed/*
+dataset/captures/*
+dataset/hard_negatives/*
+
+!dataset/raw_images/.gitkeep
+!dataset/raw_videos/.gitkeep
+!dataset/processed/.gitkeep
+!dataset/captures/.gitkeep
+!dataset/hard_negatives/.gitkeep
+!dataset/models/.gitkeep
+
+# Exclusión general de formatos multimedia pesados
 *.mp4
 *.avi
 *.mov
 *.mkv
+*.wmv
 *.jpg
 *.jpeg
 *.png
@@ -54,42 +67,36 @@ dataset/hard_negatives/
 *.webp
 
 # ------------------------------------------------------------
-# Modelos entrenados y pesos descargables
-#   - dataset/models/**.pkl : artefactos de train_facial_svm.py
-#                             y train_reid_svm.py (regenerables)
-#   - yolov8n.pt            : lo descarga ultralytics al primer uso
-# Se CONSERVA models/face_detection_yunet.onnx (220 KB): es un
-# activo requerido por config.yaml que no se descarga solo.
+# Pesos de modelos y serializaciones (.pkl, .pt, .onnx)
+# Se conserva el detector YuNet por ser un modelo base ligero
 # ------------------------------------------------------------
-dataset/models/
+dataset/models/*
 *.pkl
 *.pt
 *.pth
 *.joblib
+*.h5
+*.tflite
+*.onnx
+
 !models/face_detection_yunet.onnx
 
 # ------------------------------------------------------------
-# Salidas generadas en tiempo de ejecución
+# Registros y reportes generados en tiempo de ejecución
 # ------------------------------------------------------------
 logs/
 reports/
+*.log
 
 # ------------------------------------------------------------
-# Estructura de carpetas de entrada que el código NO auto-crea
-# (las de salida sí, vía ensure_dir / logger)
-# ------------------------------------------------------------
-!dataset/raw_images/.gitkeep
-!dataset/raw_videos/.gitkeep
-
-# ------------------------------------------------------------
-# Configuración local / secretos
+# Configuración local y variables de entorno
 # ------------------------------------------------------------
 config.local.yaml
 .env
 .env.*
 
 # ------------------------------------------------------------
-# Editores y sistema operativo
+# Editores de código y sistema operativo
 # ------------------------------------------------------------
 .vscode/
 .idea/

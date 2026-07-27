@@ -5,7 +5,7 @@ from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from classification.svm_facial_model import SVMFacialModel
 from classification.logistic_confidence_converter import decision_margin_to_probability
-from feature_extraction.face.face_quality_filter import check_face_quality
+from feature_extraction.face.face_quality_validator import validate_face_quality
 
 _face_detector: YuNetFaceDetector | None = None
 _svm_facial: SVMFacialModel | None = None
@@ -31,8 +31,8 @@ def run_id_branch(body_roi: np.ndarray) -> tuple[str, float]:
     face_result = _get_face_detector().detect(body_roi)
     face_gray = normalize_face(body_roi, face_result)
 
-    quality = check_face_quality(body_roi, face_result, strict=False)
-    if not quality.passed:
+    quality = validate_face_quality(body_roi, face_result)
+    if not quality.is_valid:
         return "Desconocido", 0.0
 
     if face_gray is None:

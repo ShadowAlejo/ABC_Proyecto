@@ -1,4 +1,10 @@
-"""Punto de entrada del Sistema de Identificación (ID) y Re-identificación (Re-ID)."""
+"""Punto de entrada del Sistema de Identificación (ID) y Re-identificación (Re-ID).
+
+Modos de ejecución:
+    python main.py           → Ventana OpenCV clásica (comportamiento original)
+    python main.py --ui      → Dashboard visual PyQt6 (interfaz enriquecida)
+"""
+import argparse
 import sys
 from pathlib import Path
 
@@ -37,9 +43,8 @@ def draw_overlay(frame, results):
     return frame
 
 
-def main():
-    config = ConfigLoader.load("config.yaml")
-
+def run_classic(config: dict):
+    """Modo clásico: ventana OpenCV simple (comportamiento original)."""
     detector = YOLOv8nDetector(
         model_path=config["detection"]["yolo_model_path"],
         conf_threshold=config["detection"]["conf_threshold"],
@@ -67,6 +72,33 @@ def main():
 
     cv2.destroyAllWindows()
     logger.info(f"Estadísticas del scheduler: {scheduler.stats}")
+
+
+def run_dashboard(config: dict):
+    """Modo dashboard: interfaz visual PyQt6 con stats en tiempo real."""
+    from ui.dashboard import launch_dashboard
+    return launch_dashboard(config)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sistema de Identificación y Re-identificación de Personas"
+    )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="Lanza el dashboard visual PyQt6 en lugar de la ventana OpenCV clásica.",
+    )
+    args = parser.parse_args()
+
+    config = ConfigLoader.load("config.yaml")
+
+    if args.ui:
+        logger.info("Iniciando en modo Dashboard PyQt6.")
+        return run_dashboard(config)
+    else:
+        logger.info("Iniciando en modo OpenCV clásico.")
+        return run_classic(config)
 
 
 if __name__ == "__main__":
