@@ -1,0 +1,102 @@
+# ============================================================
+#  Sistema de Identificación (ID) y Re-identificación (Re-ID)
+#  .gitignore — mantiene el repositorio en código fuente puro
+# ============================================================
+
+# ------------------------------------------------------------
+# Entorno virtual (~1 GB) — se reconstruye con requirements.txt
+# ------------------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+
+# ------------------------------------------------------------
+# Python
+# ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ------------------------------------------------------------
+# Dataset: material multimedia (~3.1 GB)
+# Contiene rostros de personas reales — no debe publicarse.
+# camara_04.mp4 (127 MB) además excede el límite de 100 MB/archivo
+# que GitHub rechaza en el push.
+# ------------------------------------------------------------
+dataset/raw_images/
+dataset/raw_videos/
+dataset/processed/
+dataset/captures/
+dataset/hard_negatives/
+
+# Formatos multimedia en cualquier ubicación (red de seguridad)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+
+# ------------------------------------------------------------
+# Modelos entrenados y pesos descargables
+#   - dataset/models/**.pkl : artefactos de train_facial_svm.py
+#                             y train_reid_svm.py (regenerables)
+#   - yolov8n.pt            : lo descarga ultralytics al primer uso
+# Se CONSERVA models/face_detection_yunet.onnx (220 KB): es un
+# activo requerido por config.yaml que no se descarga solo.
+# ------------------------------------------------------------
+dataset/models/
+*.pkl
+*.pt
+*.pth
+*.joblib
+!models/face_detection_yunet.onnx
+
+# ------------------------------------------------------------
+# Salidas generadas en tiempo de ejecución
+# ------------------------------------------------------------
+logs/
+reports/
+
+# ------------------------------------------------------------
+# Estructura de carpetas de entrada que el código NO auto-crea
+# (las de salida sí, vía ensure_dir / logger)
+# ------------------------------------------------------------
+!dataset/raw_images/.gitkeep
+!dataset/raw_videos/.gitkeep
+
+# ------------------------------------------------------------
+# Configuración local / secretos
+# ------------------------------------------------------------
+config.local.yaml
+.env
+.env.*
+
+# ------------------------------------------------------------
+# Editores y sistema operativo
+# ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
