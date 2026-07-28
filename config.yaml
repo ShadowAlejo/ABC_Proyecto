@@ -1,6 +1,6 @@
 video:
-  source: "dataset/raw_videos/videos_prueba/camara_02.mp4"  # o 0 para cámara
-  target_fps: 15
+  source: "dataset/raw_videos/videos_prueba/Video_1.mov"  # o 0 para cámara
+  target_fps: 30
 
 detection:
   yolo_model_path: "yolov8n.pt"

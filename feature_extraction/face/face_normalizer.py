@@ -37,6 +37,11 @@ def normalize_face(roi: np.ndarray,
     x, y, w, h = [float(v) for v in face_result.bbox]
     roi_h, roi_w = roi.shape[:2]
 
+    # Guardia contra coordenadas inválidas (inf / nan) que provoca OverflowError al convertir a int.
+    # Ocurre cuando YuNet detecta una cara en el borde del ROI o con geometría degenerada.
+    if not all(np.isfinite(v) for v in (x, y, w, h)) or w <= 0 or h <= 0:
+        return None
+
     pad_x, pad_y = w * PADDING_RATIO, h * PADDING_RATIO
     x1 = max(0, int(x - pad_x))
     y1 = max(0, int(y - pad_y))
