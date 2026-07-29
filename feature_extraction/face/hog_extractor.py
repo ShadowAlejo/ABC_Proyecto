@@ -31,7 +31,7 @@ _HOG_COMPONENT = cv2.HOGDescriptor(
 
 
 def _extract_patch(gray: np.ndarray, x: float, y: float, size: int = 16) -> np.ndarray:
-    """Extrae un parche centrado en (x, y). Si sale de los bordes, hace padding (reflect)."""
+    """Extrae un parche centrado en (x, y). Si sale de los bordes, hace padding."""
     h, w = gray.shape
     half = size // 2
     ix, iy = int(round(x)), int(round(y))
@@ -39,23 +39,29 @@ def _extract_patch(gray: np.ndarray, x: float, y: float, size: int = 16) -> np.n
     y1, y2 = iy - half, iy + half
     x1, x2 = ix - half, ix + half
 
-    # Si el parche se sale de la imagen, usamos pad
-    if y1 < 0 or y2 > h or x1 < 0 or x2 > w:
-        pad_y1 = max(0, -y1)
-        pad_y2 = max(0, y2 - h)
-        pad_x1 = max(0, -x1)
-        pad_x2 = max(0, x2 - w)
-        
-        y1 = max(0, y1)
-        y2 = min(h, y2)
-        x1 = max(0, x1)
-        x2 = min(w, x2)
-        
-        crop = gray[y1:y2, x1:x2]
-        padded = np.pad(crop, ((pad_y1, pad_y2), (pad_x1, pad_x2)), mode='reflect')
-        return padded
+    # Si el parche esta completamente fuera de la imagen
+    if x2 <= 0 or x1 >= w or y2 <= 0 or y1 >= h:
+        return np.zeros((size, size), dtype=gray.dtype)
+
+    # Calcular cuanto padding se necesita
+    pad_y1 = max(0, -y1)
+    pad_y2 = max(0, y2 - h)
+    pad_x1 = max(0, -x1)
+    pad_x2 = max(0, x2 - w)
+    
+    # Recortar de manera segura la region que si entra en la imagen
+    safe_y1 = max(0, min(h, y1))
+    safe_y2 = max(0, min(h, y2))
+    safe_x1 = max(0, min(w, x1))
+    safe_x2 = max(0, min(w, x2))
+    
+    crop = gray[safe_y1:safe_y2, safe_x1:safe_x2]
+    
+    # Si la porcion es valida, aplicar reflect, si no, rellenar con ceros (fallback)
+    if crop.size > 0:
+        return np.pad(crop, ((pad_y1, pad_y2), (pad_x1, pad_x2)), mode='reflect')
     else:
-        return gray[y1:y2, x1:x2]
+        return np.zeros((size, size), dtype=gray.dtype)
 
 
 def extract_hog_features(face_gray_64x64: np.ndarray, landmarks: list = None) -> np.ndarray:

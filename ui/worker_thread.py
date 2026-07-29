@@ -128,15 +128,44 @@ class PipelineWorker(QThread):
         try:
             with VideoStreamReader(self.source) as reader:
                 self.event_logged.emit("▶ Pipeline iniciado")
+                
+                stream_start_time = None
+                fps = reader.get_fps()
+                if fps <= 0 or np.isnan(fps):
+                    fps = 30.0
+                    
+                is_live = isinstance(self.source, int) or str(self.source).isdigit()
+
                 for frame_data in reader.read_frames():
                     if self._stop_requested:
                         break
 
-                    while self._paused and not self._stop_requested:
-                        time.sleep(0.05)
+                    if self._paused:
+                        pause_start = time.perf_counter()
+                        while self._paused and not self._stop_requested:
+                            time.sleep(0.05)
+                        if stream_start_time is not None:
+                            stream_start_time += (time.perf_counter() - pause_start)
 
                     if self._stop_requested:
                         break
+
+                    # Sincronización de velocidad original
+                    if stream_start_time is None:
+                        stream_start_time = time.perf_counter() - (frame_data.timestamp_ms / 1000.0)
+
+                    expected_time = stream_start_time + (frame_data.timestamp_ms / 1000.0)
+                    current_time = time.perf_counter()
+
+                    # Si procesamos muy rápido y es un archivo, esperamos
+                    if not is_live and current_time < expected_time:
+                        time.sleep(expected_time - current_time)
+                        current_time = time.perf_counter()
+
+                    # Si el procesamiento es lento, nos saltamos este frame para mantener el ritmo
+                    if current_time - expected_time > 0.1:
+                        scheduler.stats.skipped += 1
+                        continue
 
                     def _process(fd):
                         nonlocal current_fps, fps_frame_count

@@ -24,6 +24,7 @@ import cv2
 sys.path.append(str(Path(__file__).resolve().parent.parent))  # permite importar módulos del proyecto
 
 from classification.svm_facial_model import SVMFacialModel
+from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
 from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from feature_extraction.face.face_quality_validator import validate_face_quality
