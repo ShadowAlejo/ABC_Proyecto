@@ -53,10 +53,10 @@ class PipelineOrchestrator:
             if roi is None or roi.size == 0:
                 continue
 
-            branch, face_conf = route_branch(roi)
+            branch, face_conf, face_result = route_branch(roi)
 
             if branch == "ID":
-                identity, raw_confidence = run_id_branch(roi)
+                identity, raw_confidence = run_id_branch(roi, face_result=face_result)
             else:
                 identity, raw_confidence = run_reid_branch(roi)
 

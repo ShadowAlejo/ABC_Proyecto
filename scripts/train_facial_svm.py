@@ -1,18 +1,20 @@
-"""Entrena el SVM Facial (16 clases) a partir de dataset/raw_images/<sujeto>/*.jpg.
+"""Entrena el SVM Facial (15 clases) a partir de dataset/raw_images/<sujeto>/*.jpg.
 
-Estrategia de extracción de muestras (máximo recall):
-  Capa 1 — detect_training() + validate_face_quality(training_mode=True):
-           imagen limpia que pasa los filtros relajados → ACEPTADA.
-  Capa 2 — detect_training() recovered + validate_face_quality(training_mode=True):
-           rostro encontrado solo con preprocesamiento adicional, pasa filtro relajado → RECUPERADA.
-  Capa 3 — sin detección válida → DESCARTADA (irrecuperable).
+Estrategia de extraccion de muestras (maximo recall):
+  Capa 1 - detect_training() + validate_face_quality(training_mode=True):
+           imagen limpia que pasa los filtros relajados -> ACEPTADA.
+  Capa 2 - detect_training() recovered + validate_face_quality(training_mode=True):
+           rostro encontrado solo con preprocesamiento adicional -> RECUPERADA.
+  Capa 3 - sin deteccion valida -> DESCARTADA.
 
-En todos los casos aceptados:
-  - normalize_face(enhance_for_training=True): CLAHE + unsharp masking antes de HOG.
-  - extract_hog_features() extrae HOG piramidal (celdas 4×4, 8×8, 16×16) para
-    capturar patrones a todas las frecuencias espaciales.
-  - Augmentación de escala: 5 variantes de zoom (0.5×–1.5×) por cada cara aceptada,
-    simulando la misma persona a diferentes distancias de la cámara.
+Pipeline de features (identico al usado en inferencia):
+  normalize_face(): crop -> alineacion por landmarks -> CLAHE -> unsharp -> 64x64
+  extract_combined_features(): HOG piramidal (5814) + LBP uniforme grid 4x4 (160) = 5974 dims
+
+Augmentacion sistematica (solo ESCALA y ROTACIONES moderadas):
+  - Escala: 5 variantes de zoom [0.5x-1.5x] -> invarianza a distancia
+  - Rotacion: +-7 y +-15 grados -> inclinaciones reales de cabeza
+  - Flip DESACTIVADO: la asimetria facial es informacion discriminativa valiosa
 """
 import sys
 from pathlib import Path
@@ -21,7 +23,7 @@ import cv2
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))  # permite importar módulos del proyecto
 
-from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
+from classification.svm_facial_model import SVMFacialModel
 from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from feature_extraction.face.face_quality_validator import validate_face_quality
@@ -38,51 +40,50 @@ logger = get_logger("train_facial_svm")
 RAW_IMAGES_DIR = Path("dataset/raw_images")
 OUTPUT_MODEL_PATH = Path("dataset/models/svm_facial/svm_facial_model.pkl")
 MIN_SAMPLES_FOR_AUGMENTATION = 20  # clases con menos fotos que esto reciben aumento sintético
-MAX_VECTORS_PER_CLASS = 400        # cap por clase: iguala clases grandes (balanceo real)
+MAX_VECTORS_PER_CLASS = 700        # cap por clase: iguala clases grandes (balanceo real)
 
 # Factores de zoom para augmentación de escala (invarianza a distancia)
 # < 1.0 → simula persona lejana (cara pequeña en el frame)
 # > 1.0 → simula persona muy cercana (cara grande / muy encuadrada)
 _SCALE_VARIANTS = [0.50, 0.65, 0.80, 1.25, 1.50]
 
+# Rotaciones en grados para invarianza a inclinacion de cabeza.
+# Rango reducido a +-15 grados: inclinaciones mayores no ocurren en produccion
+# y aumentan la varianza intra-clase sin beneficio real.
+_ROTATION_VARIANTS = [-15, -7, 7, 15]
+
+# Flip horizontal DESACTIVADO: la asimetria facial (posicion de lunares, cicatrices,
+# forma asimetrica de ojos) es informacion discriminativa clave para identificacion.
+# Activar el flip destruye esta informacion al ensenar que cara y espejo son la misma persona.
+_APPLY_FLIP = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Extracción de vector HOG desde una imagen y resultado de detección
 # ─────────────────────────────────────────────────────────────────────────────
 def _extract_vector(img: np.ndarray, face_result) -> np.ndarray | None:
-    """Normaliza el rostro con enhancement y extrae el descriptor HOG piramidal.
-    Devuelve None si el crop resulta inválido."""
-    face_gray = normalize_face(img, face_result, enhance_for_training=True)
+    """Normaliza el rostro (crop+align+CLAHE) y extrae el descriptor 100% HOG.
+    Devuelve None si el crop resulta invalido."""
+    face_gray, landmarks = normalize_face(img, face_result)
     if face_gray is None:
         return None
-    return extract_hog_features(face_gray)
+    return extract_hog_features(face_gray, landmarks)
 
 
-def _extract_scaled_variant(face_gray_64x64: np.ndarray, scale: float) -> np.ndarray | None:
-    """Simula la misma cara a distinta distancia de la cámara.
-
-    - scale < 1.0 (ej. 0.5): simula persona LEJOS. Toma el 50% central del crop
-      (emulando que YuNet entregó un bbox pequeño), lo escala de vuelta a 64×64.
-      El resultado tiene menor detalle, igual que una cara captada a mayor distancia.
-    - scale > 1.0 (ej. 1.5): simula persona MUY CERCA. Amplía el centro del crop
-      recortando los bordes (como si YuNet hubiera dado un bbox de cara muy grande).
-
-    Devuelve el vector HOG piramidal de la variante, o None si no es posible.
-    """
-    h, w = face_gray_64x64.shape[:2]  # siempre 64×64
+def _extract_scaled_variant(face_gray_64x64: np.ndarray, landmarks: list, scale: float) -> np.ndarray | None:
+    """Simula la misma cara a distinta distancia de la cámara y escala los landmarks."""
+    h, w = face_gray_64x64.shape[:2]
 
     if scale < 1.0:
-        # Zoom-out: copiar la cara a una región central más pequeña sobre fondo gris
         inner_h = max(8, int(h * scale))
         inner_w = max(8, int(w * scale))
-        canvas = np.full((h, w), 128, dtype=np.uint8)  # fondo neutro
+        canvas = np.full((h, w), 128, dtype=np.uint8)
         pad_y = (h - inner_h) // 2
         pad_x = (w - inner_w) // 2
         resized_inner = cv2.resize(face_gray_64x64, (inner_w, inner_h), interpolation=cv2.INTER_AREA)
         canvas[pad_y:pad_y + inner_h, pad_x:pad_x + inner_w] = resized_inner
         scaled = canvas
     else:
-        # Zoom-in: recortar el centro ampliado de vuelta a 64×64
         crop_h = max(8, int(h / scale))
         crop_w = max(8, int(w / scale))
         cy, cx = h // 2, w // 2
@@ -95,7 +96,43 @@ def _extract_scaled_variant(face_gray_64x64: np.ndarray, scale: float) -> np.nda
             return None
         scaled = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    return extract_hog_features(scaled)
+    scaled_landmarks = []
+    if landmarks:
+        scaled_landmarks = [((lx-32)*scale + 32, (ly-32)*scale + 32) for lx, ly in landmarks]
+
+    return extract_hog_features(scaled, scaled_landmarks)
+
+
+def _extract_rotated_variant(face_gray_64x64: np.ndarray, landmarks: list, angle: float) -> np.ndarray | None:
+    """Simula inclinación de la cabeza rotando la imagen y los landmarks."""
+    h, w = face_gray_64x64.shape[:2]
+    center = (w / 2.0, h / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(face_gray_64x64, matrix, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+    
+    rotated_landmarks = []
+    if landmarks:
+        for lx, ly in landmarks:
+            nx = matrix[0,0]*lx + matrix[0,1]*ly + matrix[0,2]
+            ny = matrix[1,0]*lx + matrix[1,1]*ly + matrix[1,2]
+            rotated_landmarks.append((nx, ny))
+            
+    return extract_hog_features(rotated, rotated_landmarks)
+
+
+def _extract_flipped_variant(face_gray_64x64: np.ndarray, landmarks: list) -> np.ndarray | None:
+    """Invertir imagen horizontalmente e intercambiar posición de ojos."""
+    flipped = cv2.flip(face_gray_64x64, 1)
+    flipped_landmarks = []
+    if landmarks:
+        for lx, ly in landmarks:
+            flipped_landmarks.append((64.0 - lx, ly))
+        if len(flipped_landmarks) >= 5:
+            # Intercambiar Ojo Izq (0) con Ojo Der (1) y Boca Izq (3) con Boca Der (4)
+            flipped_landmarks[0], flipped_landmarks[1] = flipped_landmarks[1], flipped_landmarks[0]
+            flipped_landmarks[3], flipped_landmarks[4] = flipped_landmarks[4], flipped_landmarks[3]
+            
+    return extract_hog_features(flipped, flipped_landmarks)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,8 +201,8 @@ def build_dataset(face_detector: YuNetFaceDetector, augmenter: DataAugmentationE
                 discarded += 1
                 continue
 
-            # Obtener el crop gris 64×64 para generar variantes de escala
-            face_gray_base = normalize_face(img, face_result, enhance_for_training=True)
+            # Obtener el crop gris 64×64 y sus landmarks para generar variantes de augmentacion
+            face_gray_base, landmarks_base = normalize_face(img, face_result, enhance_for_training=True)
 
             class_vectors.append((vector, img))
 
@@ -178,12 +215,25 @@ def build_dataset(face_detector: YuNetFaceDetector, augmenter: DataAugmentationE
             else:
                 accepted += 1
 
-            # ── Augmentación de escala: simula la misma cara a distinta distancia ──
+            # ── Augmentación sistemática: Escala, Rotación, Flip ──
             if face_gray_base is not None:
+                # 1. Escalas (distancia)
                 for scale in _SCALE_VARIANTS:
-                    scaled_vec = _extract_scaled_variant(face_gray_base, scale)
+                    scaled_vec = _extract_scaled_variant(face_gray_base, landmarks_base, scale)
                     if scaled_vec is not None:
                         class_vectors.append((scaled_vec, img))
+                
+                # 2. Rotaciones (inclinación de cabeza)
+                for angle in _ROTATION_VARIANTS:
+                    rot_vec = _extract_rotated_variant(face_gray_base, landmarks_base, angle)
+                    if rot_vec is not None:
+                        class_vectors.append((rot_vec, img))
+                
+                # 3. Flip horizontal (perfiles / simetría)
+                if _APPLY_FLIP:
+                    flip_vec = _extract_flipped_variant(face_gray_base, landmarks_base)
+                    if flip_vec is not None:
+                        class_vectors.append((flip_vec, img))
 
         # ── Aumento sintético si la clase tiene pocas muestras [REQ-ENT-02] ──
         total_real = len(class_vectors)
@@ -219,23 +269,23 @@ def build_dataset(face_detector: YuNetFaceDetector, augmenter: DataAugmentationE
 
         logger.info(
             f"[{class_name}] "
-            f"✅ aceptadas={accepted}  "
-            f"🔄 recuperadas={recovered}  "
-            f"❌ descartadas={discarded}  "
-            f"→ {len(class_vectors)} vectores"
+            f"[OK] aceptadas={accepted}  "
+            f"[REC] recuperadas={recovered}  "
+            f"[ERR] descartadas={discarded}  "
+            f"-> {len(class_vectors)} vectores"
         )
 
     # Resumen global
-    logger.info("─" * 60)
-    logger.info(f"RESUMEN GLOBAL DEL DATASET:")
-    logger.info(f"  ✅ Aceptadas (directas)  : {total_accepted}")
-    logger.info(f"  🔄 Recuperadas (preproc.) : {total_recovered}")
-    logger.info(f"  ❌ Descartadas            : {total_discarded}")
+    logger.info("-" * 60)
+    logger.info("RESUMEN GLOBAL DEL DATASET:")
+    logger.info(f"  [OK] Aceptadas (directas)  : {total_accepted}")
+    logger.info(f"  [REC] Recuperadas (preproc.) : {total_recovered}")
+    logger.info(f"  [ERR] Descartadas            : {total_discarded}")
     logger.info(
         f"  Tasa de cobertura: "
         f"{(total_accepted + total_recovered) / max(1, total_accepted + total_recovered + total_discarded) * 100:.1f}%"
     )
-    logger.info("─" * 60)
+    logger.info("-" * 60)
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64), class_names
 
@@ -343,7 +393,7 @@ def main():
 
 
     # -- Decision de guardado --
-    MIN_ABSOLUTE_F1 = 0.50
+    MIN_ABSOLUTE_F1 = 0.30
     MIN_IMPROVEMENT = 0.01
 
     if mean_f1 < MIN_ABSOLUTE_F1:

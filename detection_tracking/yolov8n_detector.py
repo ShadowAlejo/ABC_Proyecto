@@ -24,18 +24,32 @@ class YOLOv8nDetector:
 
     def __init__(self, model_path: str = "yolov8n.pt", conf_threshold: float = DEFAULT_CONF_THRESHOLD,
                  device: str = "cpu"):
+        import torch
         self.conf_threshold = conf_threshold
-        self.device = device
-        logger.info(f"Cargando modelo YOLOv8n desde: {model_path}")
+        
+        # Auto-fallback si se pide GPU pero no hay CUDA
+        if str(device).lower() in ["gpu", "cuda", "0"]:
+            if torch.cuda.is_available():
+                self.device = "0"
+            else:
+                logger.warning(f"Device '{device}' solicitado pero CUDA no está disponible. Cayendo a 'cpu'.")
+                self.device = "cpu"
+        else:
+            self.device = "cpu"
+            
+        logger.info(f"Cargando modelo YOLOv8n desde: {model_path} (Device: {self.device})")
         self.model = YOLO(model_path)
 
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """Devuelve únicamente detecciones de la clase 'person' con confianza >= umbral."""
+        # Se forza imgsz=480 para duplicar la velocidad en CPU respecto al default 640.
         results = self.model.predict(
             source=frame,
             conf=self.conf_threshold,
             classes=[COCO_PERSON_CLASS_ID],
             device=self.device,
+            imgsz=480,
+            half=False,
             verbose=False,
         )
 

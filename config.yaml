@@ -1,11 +1,11 @@
 video:
-  source: "dataset/raw_videos/videos_prueba/Video_1.mov"  # o 0 para cámara
+  source: "dataset/raw_videos/videos_prueba/Video_1.mov"  # o 0 para camara
   target_fps: 30
 
 detection:
   yolo_model_path: "yolov8n.pt"
   conf_threshold: 0.40
-  device: "cpu"
+  device: "gpu"
 
 tracking:
   algorithm: "bytetrack"  # bytetrack | deepsort

@@ -56,6 +56,10 @@ def validate_face_quality(roi: np.ndarray,
         return FaceQualityReport(is_valid=False, reasons=["sin_rostro_detectado"],
                                   sharpness=0.0, size_ok=False, pose_ok=False)
 
+    if not all(np.isfinite(v) for v in face_result.bbox):
+        return FaceQualityReport(is_valid=False, reasons=["bbox_invalido_nan_inf"],
+                                  sharpness=0.0, size_ok=False, pose_ok=False)
+
     x, y, w, h = [int(v) for v in face_result.bbox]
     roi_h, roi_w = roi.shape[:2]
     x, y = max(0, x), max(0, y)

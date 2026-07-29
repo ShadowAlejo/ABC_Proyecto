@@ -55,23 +55,58 @@ def run_classic(config: dict):
 
     scheduler = FrameScheduler(target_fps=config["video"]["target_fps"])
     source = config["video"]["source"]
-    source = int(source) if str(source).isdigit() else source
+    last_results = []
+    fps_delay = int(1000 / config["video"]["target_fps"])
+    
+    import threading
+    import time
+
+    # Variables compartidas
+    current_frame_data = None
+    lock = threading.Lock()
+
+    def ai_worker():
+        nonlocal last_results, current_frame_data
+        last_processed_idx = -1
+        
+        while True:
+            fd = None
+            with lock:
+                fd = current_frame_data
+            
+            # Solo procesar si hay un frame nuevo que no hayamos analizado antes
+            if fd is not None and fd.frame_index > last_processed_idx:
+                # Ejecutar YOLO + Re-ID (libera el GIL en funciones OpenCV/PyTorch)
+                results = orchestrator.process_frame(fd.frame, fd.frame_index)
+                
+                with lock:
+                    last_results = results
+                last_processed_idx = fd.frame_index
+            else:
+                time.sleep(0.005)
+
+    # Iniciar hilo de IA
+    worker_thread = threading.Thread(target=ai_worker, daemon=True)
+    worker_thread.start()
 
     with VideoStreamReader(source) as reader:
         for frame_data in reader.read_frames():
-            def process(fd):
-                results = orchestrator.process_frame(fd.frame, fd.frame_index)
-                annotated = draw_overlay(fd.frame, results)
-                cv2.imshow("ID/Re-ID System", annotated)
+            # Actualizar el frame actual para que el hilo de IA lo tome cuando esté libre
+            with lock:
+                current_frame_data = frame_data
+            
+            # Dibujar siempre los últimos resultados conocidos (tracking visual instantáneo)
+            with lock:
+                annotated = draw_overlay(frame_data.frame.copy(), last_results)
+                
+            cv2.imshow("ID/Re-ID System", annotated)
 
-            scheduler.dispatch(frame_data, process)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            # Sincronizar con el framerate original del video (ej. 33ms para 30fps)
+            if cv2.waitKey(fps_delay) & 0xFF == ord("q"):
                 logger.info("Interrupción manual por el usuario.")
                 break
 
     cv2.destroyAllWindows()
-    logger.info(f"Estadísticas del scheduler: {scheduler.stats}")
 
 
 def run_dashboard(config: dict):

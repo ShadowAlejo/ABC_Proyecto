@@ -113,18 +113,18 @@ def build_dataset(augmenter: DataAugmentationEngine):
 
         logger.info(
             f"[{class_name}] "
-            f"✅ directas={accepted}  "
-            f"🔄 augmentadas/variantes={augmented}  "
-            f"❌ descartadas={discarded}  "
-            f"→ {len(class_vectors)} vectores"
+            f"[OK] directas={accepted}  "
+            f"[AUG] augmentadas/variantes={augmented}  "
+            f"[ERR] descartadas={discarded}  "
+            f"-> {len(class_vectors)} vectores"
         )
 
-    logger.info("─" * 60)
+    logger.info("-" * 60)
     logger.info("RESUMEN GLOBAL DATASET RE-ID:")
-    logger.info(f"  ✅ Muestras directas     : {total_accepted}")
-    logger.info(f"  🔄 Muestras augmentadas  : {total_augmented}")
-    logger.info(f"  ❌ Muestras descartadas  : {total_discarded}")
-    logger.info("─" * 60)
+    logger.info(f"  [OK] Muestras directas     : {total_accepted}")
+    logger.info(f"  [AUG] Muestras augmentadas  : {total_augmented}")
+    logger.info(f"  [ERR] Muestras descartadas  : {total_discarded}")
+    logger.info("-" * 60)
 
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64), class_names
 
