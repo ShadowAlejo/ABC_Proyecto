@@ -18,9 +18,9 @@ logger = get_logger(__name__)
 
 DEFAULT_FACE_CONF_THRESHOLD = 0.6
 
-# Umbral interno más laxo para NO perder candidatos (evita falsos negativos);
+# Umbral interno ajustado a 0.40 para purgar detecciones de baja calidad tempranamente;
 # el filtrado fino real ocurre después, vía landmarks + confianza combinada.
-INTERNAL_DETECTOR_THRESHOLD = 0.20
+INTERNAL_DETECTOR_THRESHOLD = 0.40
 NMS_IOU_THRESHOLD = 0.3
 
 # Umbral mínimo aceptable en modo entrenamiento (más bajo que inferencia).

@@ -1,57 +1,35 @@
-"""Recorta la region facial, alinea por landmarks, convierte a escala de grises y redimensiona a 64x64 [REQ-FAC-02].
+"""Recorta la region facial, alinea por landmarks, y redimensiona a 64x64 [REQ-FAC-02].
 
-Pipeline de normalizacion (mismo orden en entrenamiento e inferencia):
-  1. Recortar bbox con padding del 15%
-  2. Convertir a escala de grises
-  3. Alinear por landmarks: rotar para dejar los ojos horizontales (invarianza a roll de cabeza)
-  4. Resize a 64x64
-  5. Enhancement (CLAHE + unsharp masking) — SIEMPRE activo para garantizar consistencia
-     entre entrenamiento e inferencia.
-
-Nota sobre enhance_for_training:
-  El parametro se mantiene por compatibilidad pero el enhancement se aplica siempre,
-  ya que el modelo fue entrenado con el y debe recibir el mismo preprocesado en inferencia.
+Pipeline de normalizacion (Similarity Transform):
+  1. Recortar bbox con padding.
+  2. Transformacion Afin usando 5 landmarks mapeados a coordenadas canonicas 64x64.
+  3. Mantiene el espacio de color BGR para el Opponent-HOG.
 """
 import cv2
 import numpy as np
-from preprocessing.roi_resizer import resize_face_roi
 from feature_extraction.face.yunet_face_detector import FaceDetectionResult
 
-PADDING_RATIO = 0.15  # margen adicional alrededor del bbox facial detectado
+PADDING_RATIO = 0.15
 
-# Parametros de enhancement
-_CLAHE_CLIP_LIMIT  = 3.0
-_CLAHE_TILE_GRID   = (8, 8)
-_UNSHARP_SIGMA     = 1.0
-_UNSHARP_ALPHA     = 1.4
-
-# Limite maximo de angulo de alineacion por landmarks (grados)
-# Inclinaciones mayores a esto suelen indicar perfil extremo (yaw) no roll.
-_MAX_ALIGN_ANGLE_DEG = 20.0
-
+# Coordenadas canonicas para una imagen 64x64
+CANONICAL_LANDMARKS = np.array([
+    [20.0, 24.0],  # Left Eye
+    [44.0, 24.0],  # Right Eye
+    [32.0, 38.0],  # Nose
+    [22.0, 50.0],  # Mouth Left
+    [42.0, 50.0]   # Mouth Right
+], dtype=np.float32)
 
 def normalize_face(roi: np.ndarray,
                    face_result: FaceDetectionResult,
                    enhance_for_training: bool = True) -> tuple[np.ndarray, list] | tuple[None, None]:
-    """Devuelve la imagen facial normalizada (64x64) y sus landmarks transformados.
-
-    Pipeline identico para entrenamiento e inferencia:
-      1. Crop con padding
-      2. Escala de grises
-      3. Alineacion por landmarks (roll correction) y transformacion de puntos
-      4. CLAHE + Unsharp masking
-      5. Resize 64x64 y escalado de landmarks
-
-    Returns:
-        tuple (face_gray_64x64, landmarks_64x64) o (None, None)
-    """
+    """Devuelve la imagen facial alineada afinalmente (64x64 BGR) y sus landmarks."""
     if not face_result.detected or face_result.bbox is None:
         return None, None
 
     x, y, w, h = [float(v) for v in face_result.bbox]
     roi_h, roi_w = roi.shape[:2]
 
-    # Guardia contra coordenadas invalidas (inf/nan/degeneradas)
     if not all(np.isfinite(v) for v in (x, y, w, h)) or w <= 0 or h <= 0:
         return None, None
 
@@ -65,91 +43,38 @@ def normalize_face(roi: np.ndarray,
         return None, None
 
     face_crop = roi[y1:y2, x1:x2]
-    gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
 
-    # -- Alineacion por landmarks y transformacion de coordenadas --
-    gray, aligned_landmarks = _align_by_landmarks(gray, face_result.landmarks, x1, y1)
-
-    # -- Enhancement: CLAHE + unsharp masking --
-    gray = _enhance_gray(gray)
-
-    # -- Resize y escalado final de landmarks a 64x64 --
-    final_gray = resize_face_roi(gray)
+    # Transformacion afin de la imagen recortada
+    aligned_bgr, final_landmarks = _affine_alignment(face_crop, face_result.landmarks, x1, y1)
     
-    final_landmarks = []
-    if aligned_landmarks and final_gray is not None:
-        scale_x = 64.0 / gray.shape[1]
-        scale_y = 64.0 / gray.shape[0]
-        for (lx, ly) in aligned_landmarks:
-            final_landmarks.append((lx * scale_x, ly * scale_y))
+    return aligned_bgr, final_landmarks
 
-    return final_gray, final_landmarks
-
-
-def _align_by_landmarks(gray_crop: np.ndarray,
-                         landmarks,
-                         crop_x1: int,
-                         crop_y1: int) -> tuple[np.ndarray, list]:
-    """Rota el crop facial para correccion de roll y transforma los landmarks.
-
-    Returns:
-        tuple (imagen_rotada, landmarks_transformados)
-    """
+def _affine_alignment(crop_bgr: np.ndarray,
+                      landmarks: np.ndarray,
+                      crop_x1: int,
+                      crop_y1: int) -> tuple[np.ndarray, list]:
+    """Alinea usando estimateAffinePartial2D a un lienzo de 64x64."""
     if landmarks is None or len(landmarks) < 5:
-        return gray_crop, []
+        # Fallback a resize directo
+        resized = cv2.resize(crop_bgr, (64, 64), interpolation=cv2.INTER_LINEAR)
+        return resized, []
 
-    # 1. Transformar landmarks del espacio ROI al espacio del crop
-    crop_landmarks = []
-    for (lx, ly) in landmarks:
-        crop_landmarks.append((float(lx) - crop_x1, float(ly) - crop_y1))
+    # Ajustar landmarks al crop actual
+    crop_landmarks = np.array([
+        [lx - crop_x1, ly - crop_y1] for lx, ly in landmarks
+    ], dtype=np.float32)
 
-    left_eye  = crop_landmarks[0]
-    right_eye = crop_landmarks[1]
+    # Transformacion afin (Similarity Transform: rotacion + escala + traslacion)
+    M, _ = cv2.estimateAffinePartial2D(crop_landmarks, CANONICAL_LANDMARKS)
 
-    dx = right_eye[0] - left_eye[0]
-    dy = right_eye[1] - left_eye[1]
-    if abs(dx) < 1e-3 and abs(dy) < 1e-3:
-        return gray_crop, crop_landmarks
+    if M is None:
+        resized = cv2.resize(crop_bgr, (64, 64), interpolation=cv2.INTER_LINEAR)
+        return resized, []
 
-    angle = float(np.degrees(np.arctan2(dy, dx)))
-
-    # No corregir si el angulo es insignificante o demasiado grande (yaw, no roll)
-    if abs(angle) < 1.0 or abs(angle) > _MAX_ALIGN_ANGLE_DEG:
-        return gray_crop, crop_landmarks
-
-    # Rotar imagen
-    h, w = gray_crop.shape[:2]
-    center = (w / 2.0, h / 2.0)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    aligned = cv2.warpAffine(
-        gray_crop, M, (w, h),
+    aligned_bgr = cv2.warpAffine(
+        crop_bgr, M, (64, 64),
         flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REFLECT_101,
+        borderMode=cv2.BORDER_REFLECT_101
     )
-    
-    # 2. Rotar landmarks con la misma matriz M
-    aligned_landmarks = []
-    for (lx, ly) in crop_landmarks:
-        # M es 2x3: [ [a, b, tx], [c, d, ty] ]
-        # x' = a*x + b*y + tx
-        # y' = c*x + d*y + ty
-        nx = M[0, 0] * lx + M[0, 1] * ly + M[0, 2]
-        ny = M[1, 0] * lx + M[1, 1] * ly + M[1, 2]
-        aligned_landmarks.append((nx, ny))
 
-    return aligned, aligned_landmarks
-
-
-def _enhance_gray(gray: np.ndarray) -> np.ndarray:
-    """Aplica CLAHE + unsharp masking a un crop facial en escala de grises.
-
-    - CLAHE: normaliza iluminacion local (invarianza a condiciones de luz).
-    - Unsharp masking: realza gradientes de bordes (ojos, nariz, boca)
-      para mejorar la discriminacion del descriptor HOG+LBP.
-    """
-    clahe = cv2.createCLAHE(clipLimit=_CLAHE_CLIP_LIMIT, tileGridSize=_CLAHE_TILE_GRID)
-    gray_eq = clahe.apply(gray)
-
-    blurred = cv2.GaussianBlur(gray_eq, (0, 0), _UNSHARP_SIGMA)
-    sharpened = cv2.addWeighted(gray_eq, _UNSHARP_ALPHA, blurred, -(_UNSHARP_ALPHA - 1.0), 0)
-    return np.clip(sharpened, 0, 255).astype(np.uint8)
+    return aligned_bgr, CANONICAL_LANDMARKS.tolist()

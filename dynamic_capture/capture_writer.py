@@ -2,6 +2,7 @@
 from pathlib import Path
 from typing import Dict
 import numpy as np
+import concurrent.futures
 from utils.file_io_helpers import save_image, count_files_in_subdir
 from utils.logger import get_logger
 
@@ -16,6 +17,8 @@ class CaptureWriter:
         self.base_dir = Path(base_dir)
         self.max_captures = max_captures
         self._capture_counts: Dict[str, int] = {}
+        # Hilo dedicado a guardar imágenes para evitar bloqueo de I/O
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
     def get_capture_count(self, identity: str) -> int:
         if identity not in self._capture_counts:
@@ -26,7 +29,7 @@ class CaptureWriter:
         return self.get_capture_count(identity) < self.max_captures
 
     def write_capture(self, roi: np.ndarray, identity: str, frame_index: int) -> bool:
-        """Escribe la imagen etiquetada con la identidad confirmada, respetando el cupo de 75."""
+        """Escribe la imagen de forma asíncrona, respetando el cupo de 75."""
         if not self.has_quota_available(identity):
             return False
 
@@ -34,8 +37,15 @@ class CaptureWriter:
         filename = f"{identity}_{current_count:04d}_f{frame_index}.jpg"
         output_path = self.base_dir / identity / filename
 
-        success = save_image(roi, output_path)
-        if success:
-            self._capture_counts[identity] = current_count + 1
-            logger.debug(f"Captura guardada: {output_path}")
-        return success
+        # Incremento optimista para evitar sobre-escrituras si se encolan muchas tareas rápido
+        self._capture_counts[identity] = current_count + 1
+
+        def _async_write():
+            success = save_image(roi, output_path)
+            if success:
+                logger.debug(f"Captura guardada asíncronamente: {output_path}")
+            else:
+                self._capture_counts[identity] -= 1  # Revertir si falla
+
+        self.executor.submit(_async_write)
+        return True

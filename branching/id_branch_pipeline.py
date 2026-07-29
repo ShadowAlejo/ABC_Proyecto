@@ -4,7 +4,6 @@ from feature_extraction.face.yunet_face_detector import YuNetFaceDetector, FaceD
 from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from classification.svm_facial_model import SVMFacialModel
-from classification.logistic_confidence_converter import decision_margin_to_probability
 from feature_extraction.face.face_quality_validator import validate_face_quality
 
 _face_detector: YuNetFaceDetector | None = None
@@ -50,10 +49,9 @@ def run_id_branch(body_roi: np.ndarray,
     if face_gray is None:
         return "Desconocido", 0.0
 
-    # Extraer descriptor 100% HOG (Piramidal + Componentes locales)
+    # Extraer descriptor HOG (Piramidal + Componentes + Opponent)
     feature_vector = extract_hog_features(face_gray, landmarks)
     svm = _get_svm_facial()
 
-    identity, margin_gap = svm.predict(feature_vector)
-    probability = decision_margin_to_probability(margin_gap)
+    identity, probability = svm.predict(feature_vector)
     return identity, probability

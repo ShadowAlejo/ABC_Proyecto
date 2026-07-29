@@ -1,4 +1,4 @@
-"""Clase concreta que envuelve el SVM (o Pipeline Scaler+PCA+LinearSVC) para clases faciales [REQ-FAC-04]."""
+"""Clase concreta que envuelve el Ensamble SVM Facial [REQ-FAC-04]."""
 from typing import Any
 import numpy as np
 from classification.model_loader import load_svm_model
@@ -7,17 +7,10 @@ NUM_FACIAL_CLASSES = 16
 
 
 class SVMFacialModel:
-    """Envuelve el modelo SVM facial (bare SVC o Pipeline con PCA): expone prediccion y margen.
-
-    La confianza retornada es el 'margin_gap': la diferencia entre el margen de la clase
-    ganadora y el margen de la segunda clase. Esto es mucho mas discriminativo que usar
-    solo el margen maximo:
-      - Persona conocida clara: gap alto (ganador domina) -> alta confianza
-      - Persona desconocida: gap bajo (varias clases compiten) -> baja confianza
-    """
+    """Envuelve el modelo SVM facial (Ensamble de Subespacios)."""
 
     def __init__(self):
-        self.model: Any = None       # puede ser SVC, LinearSVC, o Pipeline
+        self.model: Any = None
         self.class_names: list[str] = []
 
     def load(self) -> None:
@@ -28,42 +21,25 @@ class SVMFacialModel:
         )
 
     def predict(self, feature_vector: np.ndarray) -> tuple[str, float]:
-        """Devuelve (identidad_predicha, margin_gap).
-
-        margin_gap = max(decision) - second_max(decision):
-          - Si hay solo 1 clase: usa max(decision) como fallback.
-          - Si hay >= 2 clases: usa la brecha entre el 1er y 2do clasificador OVR.
-
-        Compatible con:
-          - Pipeline(StandardScaler, PCA, LinearSVC)  [nuevo]
-          - SVC(kernel='linear')                      [legado]
+        """Devuelve (identidad_predicha, probabilidad_platt).
+        
+        Utiliza el umbral de rechazo de 0.70 basado en la probabilidad logística
+        fusionada de los 3 clasificadores.
         """
         if self.model is None:
             raise RuntimeError("El modelo SVM facial no ha sido cargado. Llame a load() primero.")
 
         features = feature_vector.reshape(1, -1)
 
-        # -- Una sola pasada: transformar con scaler+PCA, luego usar el clasificador final --
-        from sklearn.pipeline import Pipeline
-        is_pipeline = isinstance(self.model, Pipeline)
-        clf = self.model.steps[-1][1] if is_pipeline else self.model
+        # Ensamble devuelve probabilidades Platt de LogisticRegression
+        proba = self.model.predict_proba(features)[0]
+        
+        max_idx = int(np.argmax(proba))
+        max_prob = float(proba[max_idx])
 
-        # Transformar UNA sola vez (evita doble pasada costosa)
-        features_t = self.model[:-1].transform(features) if is_pipeline else features
+        # Criterio de rechazo estricto (0.70)
+        if max_prob < 0.70:
+            return "Desconocido", max_prob
 
-        # Vector de decision OVR (un margen por clase)
-        decision = clf.decision_function(features_t)[0]
-
-        # -- Margin gap: brecha ganador vs segundo lugar (mas discriminativo para desconocidos) --
-        if np.ndim(decision) > 0 and len(decision) >= 2:
-            top2 = np.partition(decision, -2)[-2:]   # los dos margenes mas altos
-            margin_gap = float(top2[-1] - top2[-2])  # max - second_max
-        else:
-            # Caso binario o 1 clase: usar el margen directamente
-            margin_gap = float(decision) if np.ndim(decision) == 0 else float(np.max(decision))
-
-        # Predecir la clase ganadora directamente desde los datos ya transformados
-        pred_idx = int(clf.predict(features_t)[0])
-        identity = self.class_names[pred_idx] if pred_idx < len(self.class_names) else str(pred_idx)
-
-        return identity, margin_gap
+        identity = self.class_names[max_idx] if max_idx < len(self.class_names) else str(max_idx)
+        return identity, max_prob

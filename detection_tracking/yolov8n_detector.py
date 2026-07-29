@@ -42,13 +42,12 @@ class YOLOv8nDetector:
 
     def detect(self, frame: np.ndarray) -> List[Detection]:
         """Devuelve únicamente detecciones de la clase 'person' con confianza >= umbral."""
-        # Se forza imgsz=480 para duplicar la velocidad en CPU respecto al default 640.
+        # Se restaura la resolución original para priorizar precisión sobre la velocidad en CPU.
         results = self.model.predict(
             source=frame,
             conf=self.conf_threshold,
             classes=[COCO_PERSON_CLASS_ID],
             device=self.device,
-            imgsz=480,
             half=False,
             verbose=False,
         )

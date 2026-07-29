@@ -3,6 +3,7 @@ motor de decisión y captura dinámica. No hereda de clases base; compone funcio
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import numpy as np
+import concurrent.futures
 
 from detection_tracking.yolov8n_detector import YOLOv8nDetector, Detection
 from detection_tracking.bytetrack_adapter import ByteTrackAdapter
@@ -41,17 +42,20 @@ class PipelineOrchestrator:
     identity_state: TrackIdentityState = field(default_factory=TrackIdentityState)
     voting: WeightedVotingInertia = field(default_factory=WeightedVotingInertia)
     gate: ThresholdAcceptanceGate = field(default_factory=ThresholdAcceptanceGate)
-    capture_evaluator: CaptureTriggerEvaluator = field(default_factory=CaptureTriggerEvaluator)
+    executor: concurrent.futures.ThreadPoolExecutor = field(init=False)
+
+    def __post_init__(self):
+        # i9-14900HX tiene 24 cores (8P+16E), 32 hilos. 16 workers es un buen balance para inferencia concurrente.
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=16)
 
     def process_frame(self, frame: np.ndarray, frame_index: int) -> List[TrackResult]:
         detections: List[Detection] = self.detector.detect(frame)
         tracks = self.tracker.update(detections, frame)
 
-        results: List[TrackResult] = []
-        for track in tracks:
+        def _process_track(track):
             roi = self._crop_roi(frame, track.bbox)
             if roi is None or roi.size == 0:
-                continue
+                return None
 
             branch, face_conf, face_result = route_branch(roi)
 
@@ -84,16 +88,20 @@ class PipelineOrchestrator:
                     frame_index=frame_index,
                 )
 
-            results.append(
-                TrackResult(
-                    track_id=track.track_id,
-                    bbox=track.bbox,
-                    identity=final_identity,
-                    confidence=winner_confidence,
-                    branch_used=branch,
-                    captured=captured,
-                )
+            return TrackResult(
+                track_id=track.track_id,
+                bbox=track.bbox,
+                identity=final_identity,
+                confidence=winner_confidence,
+                branch_used=branch,
+                captured=captured,
             )
+
+        results: List[TrackResult] = []
+        for res in self.executor.map(_process_track, tracks):
+            if res is not None:
+                results.append(res)
+                
         return results
 
     @staticmethod

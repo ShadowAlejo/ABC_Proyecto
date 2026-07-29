@@ -3,8 +3,8 @@ video:
   target_fps: 30
 
 detection:
-  yolo_model_path: "yolov8n.pt"
-  conf_threshold: 0.40
+  yolo_model_path: "yolov8m.pt"
+  conf_threshold: 0.60
   device: "gpu"
 
 tracking:
@@ -13,7 +13,7 @@ tracking:
 
 face:
   yunet_model_path: "models/face_detection_yunet.onnx"
-  conf_threshold: 0.60
+  conf_threshold: 0.75
 
 decision:
   t_aceptacion: 0.65
