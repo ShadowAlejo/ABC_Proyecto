@@ -67,15 +67,15 @@ Sistema inteligente en tiempo real y offline para **Identificación Facial (ID)*
    - **YOLOv8n**: Detecta cajas delimitadoras de personas (`person`, confianza $\ge 0.40$).
    - **ByteTrack / DeepSORT**: Asigna e intercala identificadores temporales estables (`track_id`).
 2. **Ruteo Dinámico (`face_visibility_router`)**:
-   - **Rama ID (Facial)**: Activada cuando YuNet detecta rostro con confianza $\ge 0.40$. Recorta la cara, la normaliza a $64 \times 64$, aplica filtrado de calidad facial, extrae vector HOG y predice con el SVM Facial.
-   - **Rama Re-ID (Corporal)**: Fallback cuando el rostro está ocluido o en perfil severo. Recorta el torso a $64 \times 128$, aplica una máscara sigmoidea de zona estable (privilegia cabeza/hombros), extrae descriptores LBP Uniformes multi-escala ($R=1, P=8$ y $R=2, P=16$), normaliza con $L_2$ global y predice con el SVM Re-ID.
+   - **Rama ID (Facial)**: Activada cuando YuNet detecta rostro con confianza $\ge 0.40$. Utiliza `detect_training()` con una cascada de 8 variantes de preprocesamiento (CLAHE, Gamma) para máxima robustez y total concordancia con la fase de entrenamiento. Extrae vector HOG y predice con el SVM Facial.
+   - **Rama Re-ID (Corporal)**: Fallback automático cuando el rostro está ocluido, en perfil severo, o cuando la confianza del SVM Facial cae por debajo de 0.65. Recorta el torso a $64 \times 128$, aplica máscara sigmoidea, extrae descriptores LBP-U y predice con el SVM Re-ID.
 3. **Motor de Decisión (`decision_engine`)**:
-   - **`WeightedVotingInertia`**: Inercia temporal de votación ponderada con factor de decaimiento exponencial (0.98).
+   - **`WeightedVotingInertia`**: Inercia temporal de votación ponderada con factor de decaimiento (0.98) y **Laplace Smoothing** para prevenir identidades espurias cuando la persona se voltea.
    - **`ThresholdAcceptanceGate`**: Umbral crítico de aceptación ($T = 0.65$).
-   - **`UnknownLabeler`**: Etiqueta predichos dudosos como `"Desconocido"`.
-   - **`TrackIdentityState`**: Preserva y recupera la identidad cuando el sujeto cambia temporalmente de rama.
+   - **`Exclusión Mutua`**: Resuelve colisiones en tiempo real. Si dos tracks reclaman la misma identidad, la más alta prevalece y la otra es forzada a `"Desconocido"`.
+   - **`TrackIdentityState`**: Preserva la identidad cuando el sujeto pierde visibilidad facial.
 4. **Captura Dinámica (`dynamic_capture`)**:
-   - Filtra y guarda imágenes de alta calidad (hasta 75 por ID) evaluando resolución mínima, nitidez Laplaciana, intervalo temporal entre capturas y desplazamiento postural.
+   - Filtra y guarda imágenes de alta calidad (hasta 75 por ID) evaluando resolución, nitidez Laplaciana, intervalo temporal y desplazamiento postural.
 
 ---
 
