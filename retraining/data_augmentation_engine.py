@@ -42,3 +42,22 @@ class DataAugmentationEngine:
             augmented = self._random_white_patch_variation(augmented)
             synthetic.append(augmented)
         return synthetic
+
+    def generate_jitter_samples(self, image: np.ndarray, n_samples: int = 2) -> List[np.ndarray]:
+        """Aplica jittering sutil (rotación +-3°, traslación +-2px, escala +-4%) a una imagen alineada."""
+        jittered = []
+        h, w = image.shape[:2]
+        center = (w / 2, h / 2)
+        for _ in range(n_samples):
+            angle = np.random.uniform(-3.0, 3.0)
+            scale = np.random.uniform(0.96, 1.04)
+            tx = np.random.uniform(-2.0, 2.0)
+            ty = np.random.uniform(-2.0, 2.0)
+            
+            matrix = cv2.getRotationMatrix2D(center, angle, scale)
+            matrix[0, 2] += tx
+            matrix[1, 2] += ty
+            
+            aug = cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+            jittered.append(aug)
+        return jittered

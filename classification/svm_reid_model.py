@@ -23,7 +23,13 @@ class SVMReidModel:
 
         features = feature_vector.reshape(1, -1)
         decision = self.model.decision_function(features)[0]
-        margin = float(np.max(decision)) if np.ndim(decision) > 0 else float(decision)
+        
+        # Calcular margin_gap (max - second_max) para el convertidor logístico
+        if len(decision) >= 2:
+            sorted_dec = np.sort(decision)
+            margin_gap = float(sorted_dec[-1] - sorted_dec[-2])
+        else:
+            margin_gap = float(decision) if np.ndim(decision) == 0 else float(decision[0])
 
         pred_idx = int(self.model.predict(features)[0])
         identity = self.class_names[pred_idx] if pred_idx < len(self.class_names) else str(pred_idx)

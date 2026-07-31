@@ -62,6 +62,16 @@ class PipelineOrchestrator:
 
             if branch == "ID":
                 identity, raw_confidence = run_id_branch(roi, face_result=face_result)
+                # Fallback a Re-ID: Si el rostro es visible pero el modelo facial tiene
+                # baja confianza (ej. perfil, gorra, oclusión), la ropa puede darnos
+                # la respuesta correcta.
+                if raw_confidence < self.gate.t_aceptacion:
+                    reid_identity, reid_confidence = run_reid_branch(roi)
+                    # Solo usamos el fallback si Re-ID esta mas seguro
+                    if reid_confidence > raw_confidence and reid_identity != "Desconocido":
+                        identity = reid_identity
+                        raw_confidence = reid_confidence
+                        branch = "REID"
             else:
                 identity, raw_confidence = run_reid_branch(roi)
 
@@ -98,12 +108,33 @@ class PipelineOrchestrator:
                 captured=captured,
             )
 
-        results: List[TrackResult] = []
+        raw_results: List[TrackResult] = []
         for res in self.executor.map(_process_track, tracks):
             if res is not None:
-                results.append(res)
+                raw_results.append(res)
                 
-        return results
+        # --- EXCLUSION MUTUA ---
+        # Si dos tracks distintos reclaman ser la misma persona (ej. falsos positivos o doppelgangers),
+        # solo la de mayor confianza puede mantenerla. La otra pasa a Desconocido.
+        identity_to_track: Dict[str, TrackResult] = {}
+        for res in raw_results:
+            if res.identity == "Desconocido":
+                continue
+                
+            if res.identity not in identity_to_track:
+                identity_to_track[res.identity] = res
+            else:
+                existing = identity_to_track[res.identity]
+                # Colisión detectada
+                if res.confidence > existing.confidence:
+                    # El nuevo track le roba la identidad al existente
+                    existing.identity = label_unknown()
+                    identity_to_track[res.identity] = res
+                else:
+                    # El track existente mantiene la identidad, el nuevo es desconocido
+                    res.identity = label_unknown()
+
+        return raw_results
 
     @staticmethod
     def _crop_roi(frame: np.ndarray, bbox: tuple) -> Optional[np.ndarray]:

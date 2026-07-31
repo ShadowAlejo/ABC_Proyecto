@@ -11,19 +11,19 @@ from feature_extraction.face.yunet_face_detector import FaceDetectionResult
 
 PADDING_RATIO = 0.15
 
-# Coordenadas canonicas para una imagen 64x64
+# Coordenadas canonicas para una imagen 96x96
 CANONICAL_LANDMARKS = np.array([
-    [20.0, 24.0],  # Left Eye
-    [44.0, 24.0],  # Right Eye
-    [32.0, 38.0],  # Nose
-    [22.0, 50.0],  # Mouth Left
-    [42.0, 50.0]   # Mouth Right
+    [30.0, 36.0],  # Left Eye
+    [66.0, 36.0],  # Right Eye
+    [48.0, 57.0],  # Nose
+    [33.0, 75.0],  # Mouth Left
+    [63.0, 75.0]   # Mouth Right
 ], dtype=np.float32)
 
 def normalize_face(roi: np.ndarray,
                    face_result: FaceDetectionResult,
                    enhance_for_training: bool = True) -> tuple[np.ndarray, list] | tuple[None, None]:
-    """Devuelve la imagen facial alineada afinalmente (64x64 BGR) y sus landmarks."""
+    """Devuelve la imagen facial alineada afinalmente (96x96 BGR) y sus landmarks."""
     if not face_result.detected or face_result.bbox is None:
         return None, None
 
@@ -53,10 +53,10 @@ def _affine_alignment(crop_bgr: np.ndarray,
                       landmarks: np.ndarray,
                       crop_x1: int,
                       crop_y1: int) -> tuple[np.ndarray, list]:
-    """Alinea usando estimateAffinePartial2D a un lienzo de 64x64."""
+    """Alinea usando estimateAffinePartial2D a un lienzo de 96x96."""
     if landmarks is None or len(landmarks) < 5:
         # Fallback a resize directo
-        resized = cv2.resize(crop_bgr, (64, 64), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(crop_bgr, (96, 96), interpolation=cv2.INTER_LINEAR)
         return resized, []
 
     # Ajustar landmarks al crop actual
@@ -68,11 +68,11 @@ def _affine_alignment(crop_bgr: np.ndarray,
     M, _ = cv2.estimateAffinePartial2D(crop_landmarks, CANONICAL_LANDMARKS)
 
     if M is None:
-        resized = cv2.resize(crop_bgr, (64, 64), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(crop_bgr, (96, 96), interpolation=cv2.INTER_LINEAR)
         return resized, []
 
     aligned_bgr = cv2.warpAffine(
-        crop_bgr, M, (64, 64),
+        crop_bgr, M, (96, 96),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REFLECT_101
     )

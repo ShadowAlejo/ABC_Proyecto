@@ -37,9 +37,10 @@ class SVMFacialModel:
         max_idx = int(np.argmax(proba))
         max_prob = float(proba[max_idx])
 
-        # Criterio de rechazo estricto (0.70)
-        if max_prob < 0.70:
-            return "Desconocido", max_prob
+        # NOTA: Se eliminó el umbral interno estricto. Ahora el modelo siempre 
+        # devuelve la clase con mayor probabilidad. La responsabilidad de rechazar
+        # (Desconocido) recae íntegramente en WeightedVotingInertia y el Gate (0.65)
+        # del PipelineOrchestrator, quienes agregan esta señal ruidosa a lo largo del tiempo.
 
         identity = self.class_names[max_idx] if max_idx < len(self.class_names) else str(max_idx)
         return identity, max_prob

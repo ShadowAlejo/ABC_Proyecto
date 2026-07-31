@@ -56,7 +56,11 @@ def _worker_process_facial_chunk(chunk):
     import cv2
     cv2.setNumThreads(0)
     from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
+    from retraining.data_augmentation_engine import DataAugmentationEngine
+    from feature_extraction.face.face_normalizer import normalize_face
+    from feature_extraction.face.hog_extractor import extract_hog_features
     face_detector = YuNetFaceDetector()
+    augmenter = DataAugmentationEngine()
     results = []
     for i, (img_path, class_idx) in enumerate(chunk):
         img = load_image(img_path)
@@ -73,9 +77,19 @@ def _worker_process_facial_chunk(chunk):
         face_result = face_detector.detect_training(img)
         if not face_result.detected: continue
         
-        vector = _extract_vector(img, face_result)
+        face_bgr, landmarks = normalize_face(img, face_result)
+        if face_bgr is None: continue
+        
+        vector = extract_hog_features(face_bgr, landmarks)
         if vector is not None:
             results.append((class_idx, vector))
+            
+            # Generar 2 muestras con jittering sutil
+            jittered_faces = augmenter.generate_jitter_samples(face_bgr, n_samples=2)
+            for j_face in jittered_faces:
+                j_vector = extract_hog_features(j_face, landmarks)
+                if j_vector is not None:
+                    results.append((class_idx, j_vector))
     return results
 
 def build_dataset(augmenter: DataAugmentationEngine):
@@ -162,18 +176,23 @@ def build_dataset(augmenter: DataAugmentationEngine):
 
 def build_meta_model():
     """Construye el StackingClassifier con los 3 subespacios (Global, Superior, Inferior)."""
-    # Índices exactos (1104 dimensiones por imagen):
-    # Global (Coarse): 0 a 432
-    # Superior (Ojos/Cejas): 432 a 816
-    # Inferior (Nariz/Boca): 816 a 1104
+    # Índices exactos (3264 dimensiones por imagen):
+    # Global (Coarse): 0 a 1200
+    # Superior (Ojos/Cejas): 1200 a 2544
+    # Inferior (Nariz/Boca): 2544 a 3264
     
-    ct_global = ColumnTransformer([("global", "passthrough", slice(0, 432))])
-    ct_upper  = ColumnTransformer([("upper", "passthrough", slice(432, 816))])
-    ct_lower  = ColumnTransformer([("lower", "passthrough", slice(816, 1104))])
+    ct_global = ColumnTransformer([("global", "passthrough", slice(0, 1200))])
+    ct_upper  = ColumnTransformer([("upper", "passthrough", slice(1200, 2544))])
+    ct_lower  = ColumnTransformer([("lower", "passthrough", slice(2544, 3264))])
+    
+    from sklearn.model_selection import GridSearchCV
+    # Para el SVM base, en lugar de un C fijo, usamos GridSearchCV para encontrar el óptimo en cada subespacio.
+    base_svm = LinearSVC(class_weight="balanced", max_iter=2000, random_state=42)
+    grid_svm = GridSearchCV(base_svm, param_grid={'C': [0.5, 1.0, 5.0, 10.0]}, cv=3, n_jobs=1)
     
     pipe_base = Pipeline([
         ("scaler", StandardScaler()),
-        ("svm", CalibratedClassifierCV(LinearSVC(C=1.0, class_weight="balanced", max_iter=2000, random_state=42), method='sigmoid', cv=2))
+        ("svm", CalibratedClassifierCV(grid_svm, method='sigmoid', cv=2))
     ])
     
     pipe_global = Pipeline([("select", ct_global), ("base", clone(pipe_base))])
@@ -188,7 +207,7 @@ def build_meta_model():
     
     return StackingClassifier(
         estimators=estimators,
-        final_estimator=LogisticRegression(multi_class='multinomial', max_iter=1000, random_state=42),
+        final_estimator=LogisticRegression(multi_class='multinomial', max_iter=1000, random_state=42, C=5.0, penalty='l2'),
         cv=5,
         n_jobs=-1
     )
