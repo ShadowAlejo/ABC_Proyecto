@@ -20,7 +20,11 @@ def save_image(image: np.ndarray, path: str | Path) -> bool:
 
 
 def load_image(path: str | Path) -> np.ndarray | None:
-    return cv2.imread(str(path))
+    try:
+        buf = np.fromfile(str(path), dtype=np.uint8)
+        return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
 
 
 def save_pickle(obj: Any, path: str | Path) -> None:

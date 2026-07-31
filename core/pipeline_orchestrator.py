@@ -42,6 +42,7 @@ class PipelineOrchestrator:
     identity_state: TrackIdentityState = field(default_factory=TrackIdentityState)
     voting: WeightedVotingInertia = field(default_factory=WeightedVotingInertia)
     gate: ThresholdAcceptanceGate = field(default_factory=ThresholdAcceptanceGate)
+    capture_evaluator: CaptureTriggerEvaluator = field(default_factory=CaptureTriggerEvaluator)
     executor: concurrent.futures.ThreadPoolExecutor = field(init=False)
 
     def __post_init__(self):

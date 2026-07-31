@@ -54,7 +54,7 @@ def run_reid_branch(body_roi: np.ndarray) -> tuple[str, float]:
     if svm is None:
         return "Desconocido", 0.0
 
-    torso_roi = isolate_torso_roi(body_roi)
+    torso_roi = isolate_torso_roi(body_roi, enhance=True)
     gray_roi = cv2.cvtColor(torso_roi, cv2.COLOR_BGR2GRAY)
 
     _, weight_map = apply_stable_zone_mask(torso_roi)

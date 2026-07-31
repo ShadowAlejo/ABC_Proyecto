@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple
 import cv2
 import numpy as np
+import threading
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +65,7 @@ class YuNetFaceDetector:
         self.input_size = input_size
         self.enable_multiscale_retry = enable_multiscale_retry
         self.enable_contrast_retry = enable_contrast_retry
+        self._lock = threading.Lock()
 
         self.detector = cv2.FaceDetectorYN.create(
             model=model_path,
@@ -220,8 +222,9 @@ class YuNetFaceDetector:
         if h < 10 or w < 10:
             return []
 
-        self.detector.setInputSize((w, h))
-        _, faces = self.detector.detect(image)
+        with self._lock:
+            self.detector.setInputSize((w, h))
+            _, faces = self.detector.detect(image)
 
         if faces is None or len(faces) == 0:
             return []

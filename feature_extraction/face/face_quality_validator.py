@@ -11,16 +11,16 @@ import numpy as np
 from feature_extraction.face.yunet_face_detector import FaceDetectionResult
 
 # ── Umbrales modo INFERENCIA (tiempo real) ──────────────────────────────────
-INF_MIN_FACE_WIDTH_PX      = 30
-INF_MIN_FACE_HEIGHT_PX     = 30
+INF_MIN_FACE_WIDTH_PX      = 32
+INF_MIN_FACE_HEIGHT_PX     = 32
 INF_MIN_SHARPNESS_VARIANCE = 25.0   # Laplaciano; rostros muy borrosos degradan el HoG.
 INF_MAX_YAW_ASYMMETRY      = 0.60   # Asimetría horizontal ojo-nariz (proxy de perfil extremo).
 
 # ── Umbrales modo ENTRENAMIENTO (más permisivos para maximizar muestras) ────
-TRN_MIN_FACE_WIDTH_PX      = 20
-TRN_MIN_FACE_HEIGHT_PX     = 20
-TRN_MIN_SHARPNESS_VARIANCE = 7.0    # Acepta imágenes con cierto desenfoque.
-TRN_MAX_YAW_ASYMMETRY      = 0.78   # Tolera hasta ~45° de perfil lateral.
+TRN_MIN_FACE_WIDTH_PX      = 32
+TRN_MIN_FACE_HEIGHT_PX     = 32
+TRN_MIN_SHARPNESS_VARIANCE = 25.0    # Acepta imágenes con cierto desenfoque.
+TRN_MAX_YAW_ASYMMETRY      = 0.60   # Tolera hasta ~45° de perfil lateral.
 
 
 @dataclass
@@ -73,6 +73,11 @@ def validate_face_quality(roi: np.ndarray,
 
     face_crop = roi[y:y2, x:x2] if (x2 > x and y2 > y) else np.zeros((1, 1), dtype=np.uint8)
     gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY) if face_crop.ndim == 3 else face_crop
+    
+    brightness = float(np.mean(gray)) if gray.size > 0 else 0.0
+    if brightness <= 35.0:
+        reasons.append(f"rostro_muy_oscuro (brillo={brightness:.1f}, min=35.0)")
+
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var()) if gray.size > 1 else 0.0
     if sharpness < min_sharp:
         reasons.append(f"rostro_borroso (var={sharpness:.1f}, min={min_sharp})")
@@ -81,7 +86,7 @@ def validate_face_quality(roi: np.ndarray,
     if not pose_ok:
         reasons.append("pose_muy_lateral_o_landmarks_incoherentes")
 
-    is_valid = size_ok and (sharpness >= min_sharp) and pose_ok
+    is_valid = size_ok and (brightness > 35.0) and (sharpness >= min_sharp) and pose_ok
     return FaceQualityReport(is_valid=is_valid, reasons=reasons, sharpness=sharpness,
                               size_ok=size_ok, pose_ok=pose_ok)
 

@@ -10,20 +10,20 @@ Para maximizar la precision, esta implementacion aplica:
 import cv2
 import numpy as np
 
-# ── HOG Piramidal Global (64x64) con 12 orientaciones y signo ──────────────────
-_HOG_FINE = cv2.HOGDescriptor(
-    _winSize=(64, 64), _blockSize=(8, 8), _blockStride=(4, 4), _cellSize=(4, 4), _nbins=12, signedGradient=True
-)
-_HOG_MID = cv2.HOGDescriptor(
-    _winSize=(64, 64), _blockSize=(16, 16), _blockStride=(8, 8), _cellSize=(8, 8), _nbins=12, signedGradient=True
-)
+# ── HOG Piramidal Global (64x64) con 12 orientaciones y SIN signo ──────────────────
+# Atributos posicionales de OpenCV HOGDescriptor:
+# winSize, blockSize, blockStride, cellSize, nbins, derivAperture, winSigma, histogramNormType, L2HysThreshold, gammaCorrection, nlevels, signedGradient
+
 _HOG_COARSE = cv2.HOGDescriptor(
-    _winSize=(64, 64), _blockSize=(32, 32), _blockStride=(16, 16), _cellSize=(16, 16), _nbins=12, signedGradient=True
+    (64, 64), (32, 32), (16, 16), (16, 16), 12, 1, -1.0, 0, 0.2, False, 64, True
 )
 
-# ── HOG de Componentes Locales (16x16) con 12 orientaciones y signo ────────────
-_HOG_COMPONENT = cv2.HOGDescriptor(
-    _winSize=(16, 16), _blockSize=(8, 8), _blockStride=(4, 4), _cellSize=(4, 4), _nbins=12, signedGradient=True
+# ── HOG de Regiones Locales (Superior e Inferior) SIN signo ────────────
+_HOG_UPPER = cv2.HOGDescriptor(
+    (40, 24), (16, 16), (8, 8), (8, 8), 12, 1, -1.0, 0, 0.2, False, 64, True
+)
+_HOG_LOWER = cv2.HOGDescriptor(
+    (32, 24), (16, 16), (8, 8), (8, 8), 12, 1, -1.0, 0, 0.2, False, 64, True
 )
 
 
@@ -45,112 +45,47 @@ def _apply_tan_triggs(gray: np.ndarray, alpha=0.1, tau=10.0, gamma=0.2, sigma0=1
     return cv2.normalize(dog, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
 
-def _extract_patch(gray: np.ndarray, x: float, y: float, size: int = 16) -> np.ndarray:
-    """Extrae un parche centrado en (x, y). Si sale de los bordes, hace padding."""
-    h, w = gray.shape
-    half = size // 2
-    ix, iy = int(round(x)), int(round(y))
+def _compute_channel_hog(channel_8u: np.ndarray) -> np.ndarray:
+    """Calcula HOG Piramidal + Regiones para un solo canal de 8 bits."""
+    # Piramidal Global (Solo Coarse para balancear dimensiones ~ 432 vars)
+    global_hog = _HOG_COARSE.compute(channel_8u).flatten().astype(np.float32)
 
-    y1, y2 = iy - half, iy + half
-    x1, x2 = ix - half, ix + half
-
-    if x2 <= 0 or x1 >= w or y2 <= 0 or y1 >= h:
-        return np.zeros((size, size), dtype=gray.dtype)
-
-    pad_y1 = max(0, -y1)
-    pad_y2 = max(0, y2 - h)
-    pad_x1 = max(0, -x1)
-    pad_x2 = max(0, x2 - w)
-    
-    safe_y1 = max(0, min(h, y1))
-    safe_y2 = max(0, min(h, y2))
-    safe_x1 = max(0, min(w, x1))
-    safe_x2 = max(0, min(w, x2))
-    
-    crop = gray[safe_y1:safe_y2, safe_x1:safe_x2]
-    
-    if crop.size > 0:
-        return np.pad(crop, ((pad_y1, pad_y2), (pad_x1, pad_x2)), mode='reflect')
-    else:
-        return np.zeros((size, size), dtype=gray.dtype)
-
-
-def _compute_channel_hog(channel_8u: np.ndarray, landmarks: list = None) -> np.ndarray:
-    """Calcula HOG Piramidal + Local para un solo canal de 8 bits."""
-    # Piramidal Global
-    feat_fine   = _HOG_FINE.compute(channel_8u).flatten().astype(np.float32)
-    feat_mid    = _HOG_MID.compute(channel_8u).flatten().astype(np.float32)
-    feat_coarse = _HOG_COARSE.compute(channel_8u).flatten().astype(np.float32)
-    
-    global_hog = np.concatenate([feat_fine, feat_mid, feat_coarse], axis=0)
     norm_g = np.linalg.norm(global_hog)
     if norm_g > 1e-6:
         global_hog = global_hog / norm_g
 
-    # Local Componentes (6 parches)
-    component_features = []
-    if landmarks is not None and len(landmarks) >= 5:
-        lx_eyeL, ly_eyeL = landmarks[0]
-        lx_eyeR, ly_eyeR = landmarks[1]
-        lx_nose, ly_nose = landmarks[2]
-        lx_mouthL, ly_mouthL = landmarks[3]
-        lx_mouthR, ly_mouthR = landmarks[4]
-        
-        # 6 Puntos: OjoIzq, OjoDer, Nariz, BocaIzq, BocaDer, Entrecejo
-        lx_inter, ly_inter = (lx_eyeL + lx_eyeR) / 2.0, (ly_eyeL + ly_eyeR) / 2.0
-        
-        points = [
-            (lx_eyeL, ly_eyeL), (lx_eyeR, ly_eyeR), (lx_nose, ly_nose),
-            (lx_mouthL, ly_mouthL), (lx_mouthR, ly_mouthR), (lx_inter, ly_inter)
-        ]
-        
-        for px, py in points:
-            patch = _extract_patch(channel_8u, px, py, size=16)
-            patch_hog = _HOG_COMPONENT.compute(patch).flatten().astype(np.float32)
-            component_features.append(patch_hog)
-            
-        local_hog = np.concatenate(component_features, axis=0)
-        norm_l = np.linalg.norm(local_hog)
-        if norm_l > 1e-6:
-            local_hog = local_hog / norm_l
-    else:
-        local_hog = np.zeros((1296 * 2,), dtype=np.float32) # Fallback (6 parches * dims)
+    # Región Superior (Ojos/Cejas) - Y: 12-36, X: 12-52
+    crop_upper = channel_8u[12:36, 12:52]
+    feat_upper = _HOG_UPPER.compute(crop_upper).flatten().astype(np.float32)
+    norm_u = np.linalg.norm(feat_upper)
+    if norm_u > 1e-6:
+        feat_upper = feat_upper / norm_u
 
-    return np.concatenate([global_hog, local_hog], axis=0)
+    # Región Inferior (Nariz/Boca) - Y: 36-60, X: 16-48
+    crop_lower = channel_8u[36:60, 16:48]
+    feat_lower = _HOG_LOWER.compute(crop_lower).flatten().astype(np.float32)
+    norm_l = np.linalg.norm(feat_lower)
+    if norm_l > 1e-6:
+        feat_lower = feat_lower / norm_l
+
+    return np.concatenate([global_hog, feat_upper, feat_lower], axis=0)
 
 
 def extract_hog_features(face_bgr_64x64: np.ndarray, landmarks: list = None) -> np.ndarray:
-    """Extrae HOG en Espacio Oponente de Color y lo concatena.
+    """Extrae HOG usando únicamente el canal de Intensidad con filtro Tan & Triggs.
 
     Args:
         face_bgr_64x64: Imagen BGR de 64x64 alineada afinalmente.
-        landmarks: Lista de 5 puntos (x, y) de la cara alineada.
+        landmarks: Lista de 5 puntos (x, y) de la cara alineada (No usado, mantenido).
 
     Returns:
-        Vector resultante concatenado.
+        Vector resultante concatenado de 1104 dimensiones.
     """
     if face_bgr_64x64 is None or face_bgr_64x64.shape[:2] != (64, 64):
         raise ValueError("Se requiere imagen facial alineada de 64x64 BGR.")
 
-    b_float = face_bgr_64x64[:, :, 0].astype(np.float32)
-    g_float = face_bgr_64x64[:, :, 1].astype(np.float32)
-    r_float = face_bgr_64x64[:, :, 2].astype(np.float32)
-
-    # Canal 1: Intensidad (Grayscale) con Tan & Triggs
+    # Canal Único: Intensidad (Grayscale) con Tan & Triggs
     gray = cv2.cvtColor(face_bgr_64x64, cv2.COLOR_BGR2GRAY)
     channel_intensity = _apply_tan_triggs(gray)
 
-    # Canal 2: Opponent 1 (R - G)
-    o1 = r_float - g_float
-    o1_norm = cv2.normalize(o1, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-
-    # Canal 3: Opponent 2 (R + G - 2B)
-    o2 = r_float + g_float - 2.0 * b_float
-    o2_norm = cv2.normalize(o2, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-
-    hog_int = _compute_channel_hog(channel_intensity, landmarks)
-    hog_o1  = _compute_channel_hog(o1_norm, landmarks)
-    hog_o2  = _compute_channel_hog(o2_norm, landmarks)
-
-    # Vector gigante final
-    return np.concatenate([hog_int, hog_o1, hog_o2], axis=0)
+    return _compute_channel_hog(channel_intensity)
