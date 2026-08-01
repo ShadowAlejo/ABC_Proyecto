@@ -36,10 +36,7 @@ class WeightedVotingInertia:
 
         winner_identity = max(track_votes.weighted_scores, key=track_votes.weighted_scores.get)
         winner_score = track_votes.weighted_scores[winner_identity]
-        # Añadir un factor de suavizado (Laplace smoothing) para penalizar
-        # la confianza si el track tiene muy poco peso acumulado (ej. falsos
-        # positivos esporádicos o rostros que se voltearon hace mucho tiempo).
-        normalized_confidence = winner_score / (track_votes.total_weight + 0.5)
+        normalized_confidence = winner_score / (track_votes.total_weight + 0.05)
 
         return winner_identity, float(normalized_confidence)
 

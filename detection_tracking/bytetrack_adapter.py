@@ -24,7 +24,7 @@ class Track:
 
 class _ByteTrackArgs:
     """Argumentos requeridos por BYTETracker."""
-    track_thresh = 0.6
+    track_thresh = 0.45
     track_buffer = 90
     match_thresh = 0.8
     mot20 = False

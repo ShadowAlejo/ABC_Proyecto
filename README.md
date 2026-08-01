@@ -111,6 +111,9 @@ Sistema inteligente en tiempo real y offline para **Identificación Facial (ID)*
    pip install git+https://github.com/Megvii-BaseDetection/YOLOX.git --no-deps
    ```
 
+> ⚠️ **Nota sobre Modelos y Caché**: Por diseño, este repositorio omite en su control de versiones (`.gitignore`) todos los archivos temporales, carpetas de caché (`__pycache__`) y modelos pesados preentrenados/entrenados (como `yolov8n.pt` o los generados localmente `.pkl`). YOLOv8 se descarga automáticamente al primer uso y los modelos SVM de identidad deben ser entrenados mediante los scripts correspondientes.
+
+
 ---
 
 ## 📁 Estructura del Proyecto

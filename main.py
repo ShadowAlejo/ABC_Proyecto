@@ -36,7 +36,16 @@ def build_tracker(config: dict):
 def draw_overlay(frame, results):
     for r in results:
         x1, y1, x2, y2 = [int(v) for v in r.bbox]
-        color = (0, 200, 0) if r.identity != "Desconocido" else (0, 0, 200)
+        is_unknown = r.identity == "Desconocido"
+        
+        # Paleta: Verde para ID, Naranja para Re-ID, Rojo para Desconocido
+        if is_unknown:
+            color = (0, 0, 220)       # Rojo
+        elif r.branch_used == "ID":
+            color = (0, 205, 0)       # Verde vivo
+        else:
+            color = (0, 165, 255)     # Naranja Re-ID
+            
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         label = f"ID:{r.track_id} {r.identity} ({r.confidence:.2f}) [{r.branch_used}]"
         cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)

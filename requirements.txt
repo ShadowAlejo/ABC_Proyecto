@@ -1,3 +1,5 @@
+# Para aceleración por GPU (CUDA):
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 opencv-contrib-python==4.10.0.84
 ultralytics==8.3.28
 numpy==1.26.4

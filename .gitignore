@@ -46,6 +46,7 @@ dataset/raw_videos/*
 dataset/processed/*
 dataset/captures/*
 dataset/hard_negatives/*
+dataset/cache/*
 
 !dataset/raw_images/.gitkeep
 !dataset/raw_videos/.gitkeep
@@ -70,6 +71,7 @@ dataset/hard_negatives/*
 # Pesos de modelos y serializaciones (.pkl, .pt, .onnx)
 # Se conserva el detector YuNet por ser un modelo base ligero
 # ------------------------------------------------------------
+models/*
 dataset/models/*
 *.pkl
 *.pt

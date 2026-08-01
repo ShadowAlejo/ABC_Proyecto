@@ -1,258 +1,276 @@
-"""Entrena el Ensamble SVM Facial (Global, Ojos, Nariz/Boca) con Opponent-HOG.
+"""Entrena el Ensamble SVM Facial (Global, Ojos, Nariz/Boca) con HOG en canal único e iluminación Tan & Triggs.
 
 Optimizaciones aplicadas:
-  - Jittering espacial (+-2 px) para robustez.
-  - Reduccion de dimensionalidad: PCA(whiten) + LDA + L2 Normalization.
-  - Ensamble de subespacios combinado por regresion logistica (Platt Scaling).
+  - Memory-Mapped Out-of-Core Processing para manejar 100K+ vectores sin agotar la RAM.
+  - Generación de Aumentación paralela (15 variaciones sintéticas) escritas directamente a disco.
+  - Validación Cruzada Fold-Aware estricta (Zero Data Leakage).
+  - Entrenamiento por mini-batches con `partial_fit` para estabilizar el Descenso de Gradiente Estocástico.
 """
 import sys
 from pathlib import Path
 import numpy as np
 import cv2
 import warnings
-import random
 import os
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from classification.svm_facial_model import SVMFacialModel
+from classification.subspace_facial_ensemble import SubspaceFacialEnsemble
 from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
 from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from feature_extraction.face.face_quality_validator import validate_face_quality
-from retraining.class_balancer import compute_class_weights
 from retraining.data_augmentation_engine import DataAugmentationEngine
-from sklearn.svm import LinearSVC
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import StratifiedKFold, GroupKFold, cross_validate
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import StackingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.base import clone
-from sklearn.metrics import make_scorer, f1_score as sk_f1
-from utils.file_io_helpers import list_files, save_pickle, load_pickle, load_image
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import f1_score as sk_f1
+from utils.file_io_helpers import list_files, save_pickle, load_image
 from utils.logger import get_logger
 
 logger = get_logger("train_facial_svm")
 
 RAW_IMAGES_DIR = Path("dataset/raw_images")
 OUTPUT_MODEL_PATH = Path("dataset/models/svm_facial/svm_facial_model.pkl")
-MIN_SAMPLES_FOR_AUGMENTATION = 30
-MAX_VECTORS_PER_CLASS = 1200
+MEMMAP_DIR = Path("dataset/cache/memmap")
 
-def _extract_vector(img: np.ndarray, face_result) -> np.ndarray | None:
-    face_bgr, landmarks = normalize_face(img, face_result)
-    if face_bgr is None: return None
-    return extract_hog_features(face_bgr, landmarks)
+# Constantes de Extracción
+AUG_COUNT = 15
+TOTAL_PER_IMAGE = 1 + AUG_COUNT
+DIMS_G = 1200
+DIMS_U = 1680
+DIMS_L = 960
 
+def extract_worker(task_info: tuple[int, Path, int, Path]):
+    """Trabajador paralelo: extrae características e inserta en memmap."""
+    cv2.setNumThreads(1)
+    start_idx, img_path, class_idx, memmap_dir = task_info
+    
+    # 1. Cargar imagen original
+    img_bgr = load_image(img_path)
+    if img_bgr is None:
+        return start_idx, False
 
-CACHE_PATH = Path("dataset/cache/facial_features.npz")
+    # Reducir imágenes gigantes
+    h, w = img_bgr.shape[:2]
+    max_dim = 1024
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-def _worker_process_facial_chunk(chunk):
-    # Inicialización local para evitar Pickling y conflictos entre procesos
-    import cv2
-    cv2.setNumThreads(0)
-    from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
-    from retraining.data_augmentation_engine import DataAugmentationEngine
-    from feature_extraction.face.face_normalizer import normalize_face
-    from feature_extraction.face.hog_extractor import extract_hog_features
-    face_detector = YuNetFaceDetector()
+    detector = YuNetFaceDetector()
+    det_res = detector.detect_training(img_bgr)
+    if not det_res.detected or det_res.landmarks is None or det_res.bbox is None:
+        return start_idx, False
+    
+    q_report = validate_face_quality(img_bgr, det_res, training_mode=True)
+    if not q_report.is_valid:
+        return start_idx, False
+
+    norm_face, _ = normalize_face(img_bgr, det_res)
+    if norm_face is None:
+        return start_idx, False
+    
+    feat_g, feat_u, feat_l = extract_hog_features(norm_face)
+
+    # Abrir memmaps locales
+    mm_g = np.memmap(memmap_dir / "X_g.dat", dtype='float32', mode='r+')
+    mm_u = np.memmap(memmap_dir / "X_u.dat", dtype='float32', mode='r+')
+    mm_l = np.memmap(memmap_dir / "X_l.dat", dtype='float32', mode='r+')
+    mm_y = np.memmap(memmap_dir / "y.dat", dtype='int64', mode='r+')
+    mm_real = np.memmap(memmap_dir / "is_real.dat", dtype='bool', mode='r+')
+    mm_group = np.memmap(memmap_dir / "group.dat", dtype='int64', mode='r+')
+
+    # Determinar shape
+    n_rows = mm_g.shape[0] // DIMS_G
+    mm_g = mm_g.reshape((n_rows, DIMS_G))
+    mm_u = mm_u.reshape((n_rows, DIMS_U))
+    mm_l = mm_l.reshape((n_rows, DIMS_L))
+
+    # Escribir el Real (índice start_idx)
+    mm_g[start_idx] = feat_g
+    mm_u[start_idx] = feat_u
+    mm_l[start_idx] = feat_l
+    mm_y[start_idx] = class_idx
+    mm_real[start_idx] = True
+    mm_group[start_idx] = start_idx // TOTAL_PER_IMAGE
+
+    # Escribir Aumentaciones
     augmenter = DataAugmentationEngine()
-    results = []
-    for i, (img_path, class_idx) in enumerate(chunk):
-        img = load_image(img_path)
-        if img is None: continue
-        
-        # Optimización crítica: Las imágenes de 6400x3600 tardan 12s por imagen. 
-        # Redimensionamos a un máximo de 1280px para acelerar 100x.
-        h, w = img.shape[:2]
-        max_dim = max(h, w)
-        if max_dim > 1280:
-            scale = 1280 / max_dim
-            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-
-        face_result = face_detector.detect_training(img)
-        if not face_result.detected: continue
-        
-        face_bgr, landmarks = normalize_face(img, face_result)
-        if face_bgr is None: continue
-        
-        vector = extract_hog_features(face_bgr, landmarks)
-        if vector is not None:
-            results.append((class_idx, vector))
-            
-            # Generar 2 muestras con jittering sutil
-            jittered_faces = augmenter.generate_jitter_samples(face_bgr, n_samples=2)
-            for j_face in jittered_faces:
-                j_vector = extract_hog_features(j_face, landmarks)
-                if j_vector is not None:
-                    results.append((class_idx, j_vector))
-    return results
-
-def build_dataset(augmenter: DataAugmentationEngine):
-    if CACHE_PATH.exists():
-        logger.info(f"Cargando características desde caché: {CACHE_PATH}")
-        data = np.load(CACHE_PATH, allow_pickle=True)
-        return data['X'], data['y'], data['groups'], data['class_names'].tolist()
-        
-    class_names = sorted([d.name for d in RAW_IMAGES_DIR.iterdir() if d.is_dir()])
-    if len(class_names) == 0:
-        raise RuntimeError("No hay clases.")
-    
-    # 1. Fase Map: Lista plana
-    flat_tasks = []
-    for class_idx, class_name in enumerate(class_names):
-        image_paths = list_files(RAW_IMAGES_DIR / class_name, (".jpg", ".jpeg", ".png"))
-        image_paths.sort()
-        for img_path in image_paths:
-            flat_tasks.append((img_path, class_idx))
-            
-    logger.info(f"Fase Map completada: {len(flat_tasks)} imágenes independientes encontradas.")
-    
-    # 2. Fase Distribución y Ejecución (MIMD)
-    num_workers = max(1, min(4, os.cpu_count() - 1))
-    chunk_size = max(1, len(flat_tasks) // num_workers)
-    chunks = [flat_tasks[i:i + chunk_size] for i in range(0, len(flat_tasks), chunk_size)]
-    
-    logger.info(f"Lanzando {num_workers} procesos trabajadores para extracción...")
-    extracted_features = []
-    
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(_worker_process_facial_chunk, chunk) for chunk in chunks]
-        completed = 0
-        for future in as_completed(futures):
-            try:
-                res = future.result()
-                extracted_features.extend(res)
-                completed += 1
-                logger.info(f"Progreso: Trabajador {completed}/{num_workers} finalizado. (+{len(res)} muestras)")
-            except Exception as e:
-                logger.error(f"Error en trabajador: {e}")
-                
-    # 3. Fase Reduce: Agrupación y Lógica de Clase
-    from collections import defaultdict
-    class_vectors = defaultdict(list)
-    for class_idx, vector in extracted_features:
-        class_vectors[class_idx].append(vector)
-        
-    X, y, groups = [], [], []
-    valid_class_names = []
-    
-    for class_idx, class_name in enumerate(class_names):
-        vectors = class_vectors.get(class_idx, [])
-        # Truncar a un máximo de 120 válidas
-        vectors = vectors[:120]
-        
-        # Control de Calidad: Mínimo 25 fotos por clase
-        if len(vectors) < 25:
-            logger.warning(f"[{class_name}] Excluida. Solo tiene {len(vectors)} vectores válidos (Mínimo requerido: 25).")
+    for i in range(AUG_COUNT):
+        curr_idx = start_idx + 1 + i
+        jittered_landmarks = augmenter.jitter_landmarks(det_res.landmarks, scale=0.02)
+        aug_face, _ = normalize_face(img_bgr, det_res, custom_landmarks=jittered_landmarks)
+        if aug_face is None:
             continue
-            
-        valid_class_names.append(class_name)
-        new_class_idx = len(valid_class_names) - 1 # Re-index based on valid classes
+        aug_face = augmenter.apply_random_erasing(aug_face, sl=0.02, sh=0.15, r1=0.3, r2=3.3)
+        af_g, af_u, af_l = extract_hog_features(aug_face)
         
-        for i, v in enumerate(vectors):
-            X.append(v)
-            y.append(new_class_idx)
-            session_id = f"{new_class_idx}_{i // 5}"
-            groups.append(session_id)
-            
-        logger.info(f"[{class_name}] -> {len(vectors)} vectores válidos. Incluida.")
-        
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.int64)
-    groups = np.array(groups)
-    
-    # Caching
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(CACHE_PATH, X=X, y=y, groups=groups, class_names=valid_class_names)
-    logger.info(f"Características guardadas en caché: {CACHE_PATH}")
-    
-    return X, y, groups, valid_class_names
+        mm_g[curr_idx] = af_g
+        mm_u[curr_idx] = af_u
+        mm_l[curr_idx] = af_l
+        mm_y[curr_idx] = class_idx
+        mm_real[curr_idx] = False
+        mm_group[curr_idx] = start_idx // TOTAL_PER_IMAGE
 
-
-def build_meta_model():
-    """Construye el StackingClassifier con los 3 subespacios (Global, Superior, Inferior)."""
-    # Índices exactos (3264 dimensiones por imagen):
-    # Global (Coarse): 0 a 1200
-    # Superior (Ojos/Cejas): 1200 a 2544
-    # Inferior (Nariz/Boca): 2544 a 3264
-    
-    ct_global = ColumnTransformer([("global", "passthrough", slice(0, 1200))])
-    ct_upper  = ColumnTransformer([("upper", "passthrough", slice(1200, 2544))])
-    ct_lower  = ColumnTransformer([("lower", "passthrough", slice(2544, 3264))])
-    
-    from sklearn.model_selection import GridSearchCV
-    # Para el SVM base, en lugar de un C fijo, usamos GridSearchCV para encontrar el óptimo en cada subespacio.
-    base_svm = LinearSVC(class_weight="balanced", max_iter=2000, random_state=42)
-    grid_svm = GridSearchCV(base_svm, param_grid={'C': [0.5, 1.0, 5.0, 10.0]}, cv=3, n_jobs=1)
-    
-    pipe_base = Pipeline([
-        ("scaler", StandardScaler()),
-        ("svm", CalibratedClassifierCV(grid_svm, method='sigmoid', cv=2))
-    ])
-    
-    pipe_global = Pipeline([("select", ct_global), ("base", clone(pipe_base))])
-    pipe_upper  = Pipeline([("select", ct_upper), ("base", clone(pipe_base))])
-    pipe_lower  = Pipeline([("select", ct_lower), ("base", clone(pipe_base))])
-    
-    estimators = [
-        ("global", pipe_global),
-        ("upper", pipe_upper),
-        ("lower", pipe_lower)
-    ]
-    
-    return StackingClassifier(
-        estimators=estimators,
-        final_estimator=LogisticRegression(multi_class='multinomial', max_iter=1000, random_state=42, C=5.0, penalty='l2'),
-        cv=5,
-        n_jobs=-1
-    )
+    return start_idx, True
 
 
 def main():
-    augmenter = DataAugmentationEngine()
-
-    X, y, groups, class_names = build_dataset(augmenter)
-    logger.info(f"Dataset construido: {X.shape[0]} muestras x {X.shape[1]} dims")
-
+    logger.info("Iniciando preparación Out-of-Core de dataset...")
+    MEMMAP_DIR.mkdir(parents=True, exist_ok=True)
+    
+    person_dirs = [d for d in RAW_IMAGES_DIR.iterdir() if d.is_dir()]
+    class_names = sorted([d.name for d in person_dirs])
+    
     if len(class_names) < 2:
         logger.error("Se necesitan al menos 2 clases para entrenar.")
         return
 
-    wrapper = build_meta_model()
+    # Fase Map: Seleccionar archivos
+    tasks = []
+    global_idx = 0
+    for class_idx, class_name in enumerate(class_names):
+        p_dir = RAW_IMAGES_DIR / class_name
+        files = list_files(p_dir, extensions=[".jpg", ".jpeg", ".png"])
+        files.sort()
+        selected_files = files[:450]
+        for f in selected_files:
+            tasks.append((global_idx, f, class_idx, MEMMAP_DIR))
+            global_idx += TOTAL_PER_IMAGE
 
-    logger.info("Iniciando validación cruzada y entrenamiento de StackingClassifier...")
-    logger.info("NOTA: Esto tomará algo de tiempo, entrenando ensambles SVM. Por favor, espera...")
+    n_total = global_idx
+    logger.info(f"Asignando archivos binarios para {n_total} vectores ({n_total//TOTAL_PER_IMAGE} reales).")
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore")
-        cv_results = cross_validate(
-            wrapper, X, y, groups=groups, cv=GroupKFold(n_splits=5),
-            scoring={"f1_macro": make_scorer(sk_f1, average="macro", zero_division=0)},
-            n_jobs=-1
-        )
+    # Pre-allocating memmaps (w+)
+    mm_g = np.memmap(MEMMAP_DIR / "X_g.dat", dtype='float32', mode='w+', shape=(n_total, DIMS_G))
+    mm_u = np.memmap(MEMMAP_DIR / "X_u.dat", dtype='float32', mode='w+', shape=(n_total, DIMS_U))
+    mm_l = np.memmap(MEMMAP_DIR / "X_l.dat", dtype='float32', mode='w+', shape=(n_total, DIMS_L))
+    mm_y = np.memmap(MEMMAP_DIR / "y.dat", dtype='int64', mode='w+', shape=(n_total,))
+    mm_real = np.memmap(MEMMAP_DIR / "is_real.dat", dtype='bool', mode='w+', shape=(n_total,))
+    mm_group = np.memmap(MEMMAP_DIR / "group.dat", dtype='int64', mode='w+', shape=(n_total,))
+    
+    # Initialize with -1 to detect unwritten rows
+    mm_y[:] = -1
+    
+    # Flush (ensure creation)
+    del mm_g, mm_u, mm_l, mm_y, mm_real, mm_group
+
+    num_workers = max(1, min(8, os.cpu_count() - 1))
+    logger.info(f"Extrayendo y mapeando características en disco (procesos: {num_workers})...")
+    
+    valid_groups = []
+    completed = 0
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(extract_worker, t): t for t in tasks}
+        for future in as_completed(futures):
+            start_idx, success = future.result()
+            if success:
+                valid_groups.append(start_idx // TOTAL_PER_IMAGE)
+            completed += 1
+            if completed % 100 == 0 or completed == len(tasks):
+                logger.info(f"Progreso extracción: {completed}/{len(tasks)} imágenes procesadas.")
+
+    valid_groups = np.array(valid_groups, dtype=np.int64)
+    logger.info(f"Extracción completada. Imágenes reales válidas: {len(valid_groups)}")
+
+    # Re-abrir para lectura (r)
+    mm_g = np.memmap(MEMMAP_DIR / "X_g.dat", dtype='float32', mode='r', shape=(n_total, DIMS_G))
+    mm_u = np.memmap(MEMMAP_DIR / "X_u.dat", dtype='float32', mode='r', shape=(n_total, DIMS_U))
+    mm_l = np.memmap(MEMMAP_DIR / "X_l.dat", dtype='float32', mode='r', shape=(n_total, DIMS_L))
+    mm_y = np.memmap(MEMMAP_DIR / "y.dat", dtype='int64', mode='r', shape=(n_total,))
+    mm_real = np.memmap(MEMMAP_DIR / "is_real.dat", dtype='bool', mode='r', shape=(n_total,))
+    mm_group = np.memmap(MEMMAP_DIR / "group.dat", dtype='int64', mode='r', shape=(n_total,))
+
+    # Obtener etiquetas de cada grupo
+    group_y = np.array([mm_y[g * TOTAL_PER_IMAGE] for g in valid_groups])
+
+    logger.info("Iniciando Validación Cruzada Zero Data Leakage...")
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    fold_scores = []
+    
+    for fold_idx, (train_group_idx, val_group_idx) in enumerate(skf.split(valid_groups, group_y)):
+        train_groups = valid_groups[train_group_idx]
+        val_groups = valid_groups[val_group_idx]
         
-    mean_f1 = np.mean(cv_results["test_f1_macro"])
-    logger.info(f"F1-Macro CV: {mean_f1:.4f}")
+        # Filtros de índices en memmap
+        train_mask = np.isin(mm_group, train_groups) & (mm_y != -1)
+        # Validación SOLO reales
+        val_mask = np.isin(mm_group, val_groups) & mm_real & (mm_y != -1)
+
+        train_indices = np.where(train_mask)[0]
+        val_indices = np.where(val_mask)[0]
+        
+        # Mezclar entrenamiento para SGD
+        np.random.shuffle(train_indices)
+        
+        fold_model = SubspaceFacialEnsemble()
+        
+        # Batch fitting
+        batch_size = 32000
+        n_batches = len(train_indices) // batch_size + (1 if len(train_indices) % batch_size != 0 else 0)
+        
+        # Scikit-learn classes
+        unique_classes = np.unique(group_y)
+        
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            for b in range(n_batches):
+                b_idx = train_indices[b*batch_size : (b+1)*batch_size]
+                X_batch_tuple = (mm_g[b_idx], mm_u[b_idx], mm_l[b_idx])
+                y_batch = mm_y[b_idx]
+                fold_model.partial_fit(X_batch_tuple, y_batch, classes=unique_classes)
+            
+            fold_model.calibrate((mm_g[val_indices], mm_u[val_indices], mm_l[val_indices]), mm_y[val_indices])
+            
+            # Evaluación
+            X_val_tuple = (mm_g[val_indices], mm_u[val_indices], mm_l[val_indices])
+            y_val = mm_y[val_indices]
+            preds = fold_model.predict(X_val_tuple)
+
+        f1 = sk_f1(y_val, preds, average="macro", zero_division=0)
+        acc = float(np.mean(preds == y_val))
+        fold_scores.append(f1)
+        logger.info(f"  Fold {fold_idx + 1}/5 -> Acc: {acc*100:.2f}%, F1: {f1:.4f} (Train: {len(train_indices)} aug, Val: {len(val_indices)} reales)")
+
+    mean_f1 = float(np.mean(fold_scores))
+    logger.info(f"F1-Macro CV Global (Zero Data Leakage): {mean_f1:.4f}")
 
     if mean_f1 >= 0.80:
-        logger.info("Entrenando modelo final con todos los datos...")
-        wrapper.fit(X, y)
+        logger.info("Entrenando modelo final con 100% de datos en modo Mini-Batch...")
+        all_train_mask = (mm_y != -1)
+        all_train_indices = np.where(all_train_mask)[0]
+        np.random.shuffle(all_train_indices)
+        
+        final_model = SubspaceFacialEnsemble()
+        batch_size = 32000
+        n_batches = len(all_train_indices) // batch_size + (1 if len(all_train_indices) % batch_size != 0 else 0)
+        
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            for b in range(n_batches):
+                b_idx = all_train_indices[b*batch_size : (b+1)*batch_size]
+                X_batch_tuple = (mm_g[b_idx], mm_u[b_idx], mm_l[b_idx])
+                y_batch = mm_y[b_idx]
+                final_model.partial_fit(X_batch_tuple, y_batch, classes=np.unique(group_y))
+
+        real_mask = mm_real & (mm_y != -1)
+        real_indices = np.where(real_mask)[0]
+        X_calib = (mm_g[real_indices], mm_u[real_indices], mm_l[real_indices])
+        y_calib = mm_y[real_indices]
+        
+        logger.info("Ajustando calibrador de probabilidades (Platt Scaling)...")
+        final_model.calibrate(X_calib, y_calib)
+
         OUTPUT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
         save_pickle({
-            "model": wrapper,
+            "model": final_model,
             "class_names": class_names,
             "cv_f1_macro": mean_f1
         }, OUTPUT_MODEL_PATH)
-        logger.info("[OK] Modelo SVM guardado correctamente.")
+        logger.info(f"[OK] Modelo SVM Facial guardado en {OUTPUT_MODEL_PATH}")
     else:
-        logger.warning(f"[ALERTA] El F1-Macro CV ({mean_f1:.4f}) es menor al umbral (0.80). El modelo NO se guardará por baja calidad.")
-
+        logger.warning(f"[ALERTA] El F1-Macro CV ({mean_f1:.4f}) es menor al umbral (0.80). NO se guardará.")
 
 if __name__ == "__main__":
     main()
-

@@ -1,16 +1,18 @@
 """Entrena el SVM Re-ID (LBP-U multi-escala) a partir de dataset/raw_images/<sujeto>/*.jpg.
 
 Mejoras aplicadas:
-  - Extracción multi-variante (real + variante CLAHE para duplicar representatividad).
-  - Normalización de iluminación (White-Patch + CLAHE en torso).
-  - Augmentación sintética mediante DataAugmentationEngine para clases minoritarias.
-  - Búsqueda de parámetro de regularización C ∈ [0.1, 1.0, 10.0] con 5-fold CV.
+  - Extracción multi-variante fotométrica (White-Patch + CLAHE en espacio LAB).
+  - Augmentación sintética para Re-ID SIN rotaciones para preservar bandas anatómicas e histogramas LBP.
+  - Validación Cruzada Fold-Aware (Zero Data Leakage): evaluación 100% pura sobre imágenes reales.
+  - Búsqueda de hiperparámetro C con 5-fold CV y promoción con ModelPromotionGatekeeper.
 """
 import sys
 from pathlib import Path
 import numpy as np
 import cv2
 import os
+import warnings
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -20,9 +22,11 @@ from feature_extraction.body.stable_zone_masker import apply_stable_zone_mask
 from feature_extraction.body.spatial_grid_histogram import extract_spatial_grid_lbp
 from retraining.class_balancer import compute_class_weights
 from retraining.data_augmentation_engine import DataAugmentationEngine
-from retraining.cross_validation_runner import CrossValidationRunner
+from retraining.cross_validation_runner import CrossValidationResult
 from retraining.model_promotion_gatekeeper import ModelPromotionGatekeeper
 from sklearn.svm import SVC
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, f1_score
 from utils.file_io_helpers import list_files, save_pickle
 from utils.logger import get_logger
 
@@ -30,6 +34,7 @@ logger = get_logger("train_reid_svm")
 
 RAW_IMAGES_DIR = Path("dataset/raw_images")
 OUTPUT_MODEL_PATH = Path("dataset/models/svm_reid/svm_reid_model.pkl")
+CACHE_PATH = Path("dataset/cache/reid_features.npz")
 MIN_SAMPLES_FOR_AUGMENTATION = 20
 
 
@@ -45,141 +50,176 @@ def _extract_reid_vector(img: np.ndarray) -> np.ndarray | None:
         return None
 
 
-CACHE_PATH = Path("dataset/cache/reid_features.npz")
+def extract_reid_worker(task_info: tuple[int, Path, str, int]) -> tuple[int, int, str, np.ndarray | None, list[np.ndarray]]:
+    """Trabajador individual: extrae vector real + 2 variantes fotométricas."""
+    img_global_id, img_path, class_name, class_idx = task_info
+    img = cv2.imread(str(img_path))
+    if img is None:
+        return img_global_id, class_idx, str(img_path), None, []
 
-def _worker_process_reid_chunk(chunk):
-    import cv2
-    cv2.setNumThreads(0)
-    results = []
-    for img_path, class_idx in chunk:
-        img = cv2.imread(str(img_path))
-        if img is None: continue
+    vec_real = _extract_reid_vector(img)
+    if vec_real is None:
+        return img_global_id, class_idx, str(img_path), None, []
 
-        # 1. Extracción de imagen real
-        vec = _extract_reid_vector(img)
-        if vec is None: continue
+    augmenter = DataAugmentationEngine()
+    aug_vectors = []
+    photo_samples = augmenter.generate_reid_photometric_samples(img, n_samples=15)
+    for p_img in photo_samples:
+        p_vec = _extract_reid_vector(p_img)
+        if p_vec is not None:
+            aug_vectors.append(p_vec)
 
-        # 2. Variante CLAHE directa
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        l_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
-        clahe_img = cv2.cvtColor(cv2.merge((l_clahe, a, b)), cv2.COLOR_LAB2BGR)
-
-        vec_clahe = _extract_reid_vector(clahe_img)
-        results.append((class_idx, img_path, vec, vec_clahe))
-    return results
+    return img_global_id, class_idx, str(img_path), vec_real, aug_vectors
 
 
 def build_dataset(augmenter: DataAugmentationEngine):
     if CACHE_PATH.exists():
         logger.info(f"Cargando características Re-ID desde caché: {CACHE_PATH}")
         data = np.load(CACHE_PATH, allow_pickle=True)
-        return data['X'], data['y'], data['class_names'].tolist()
+        real_X = data['real_X']
+        real_y = data['real_y']
+        real_img_ids = data['real_img_ids']
+        aug_dict = data['aug_dict'].item()
+        img_paths_dict = data['img_paths_dict'].item()
+        class_names = data['class_names'].tolist()
+        return real_X, real_y, real_img_ids, aug_dict, img_paths_dict, class_names
 
-    class_names = sorted([d.name for d in RAW_IMAGES_DIR.iterdir() if d.is_dir()])
-    if len(class_names) == 0:
+    class_names_all = sorted([d.name for d in RAW_IMAGES_DIR.iterdir() if d.is_dir()])
+    if len(class_names_all) == 0:
         raise RuntimeError(f"No se encontraron carpetas de sujetos en {RAW_IMAGES_DIR}")
 
-    logger.info(f"Clases Re-ID detectadas ({len(class_names)}): {class_names}")
+    logger.info(f"Clases Re-ID detectadas ({len(class_names_all)}): {class_names_all}")
 
-    # 1. Fase Map: Lista plana
-    flat_tasks = []
-    for class_idx, class_name in enumerate(class_names):
+    # 1. Fase Map: Descubrimiento de archivos con balance de hasta 450 fotos por clase
+    tasks = []
+    global_id = 0
+    for class_idx, class_name in enumerate(class_names_all):
         image_paths = list_files(RAW_IMAGES_DIR / class_name, (".jpg", ".jpeg", ".png"))
-        for img_path in image_paths:
-            flat_tasks.append((img_path, class_idx))
+        image_paths.sort()
+        # Cap a 450 imágenes para balance óptimo
+        selected_paths = image_paths[:450]
+        for img_path in selected_paths:
+            tasks.append((global_id, img_path, class_name, class_idx))
+            global_id += 1
 
-    logger.info(f"Fase Map completada: {len(flat_tasks)} imágenes para procesar.")
+    logger.info(f"Fase Map completada: {len(tasks)} imágenes seleccionadas para procesar.")
 
-    # 2. Fase Distribución y Ejecución (MIMD)
+    # 2. Fase Distribución y Ejecución Paralela
     num_workers = max(1, min(8, os.cpu_count() - 1))
-    chunk_size = max(1, len(flat_tasks) // num_workers)
-    chunks = [flat_tasks[i:i + chunk_size] for i in range(0, len(flat_tasks), chunk_size)]
-
     logger.info(f"Lanzando {num_workers} procesos trabajadores para extracción Re-ID...")
+    
     extracted_features = []
+    batch_size = 200
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(_worker_process_reid_chunk, chunk) for chunk in chunks]
+        futures = {executor.submit(extract_reid_worker, t): t for t in tasks}
+        completed = 0
         for future in as_completed(futures):
-            try:
-                extracted_features.extend(future.result())
-            except Exception as e:
-                logger.error(f"Error en trabajador Re-ID: {e}")
+            res = future.result()
+            img_id, c_idx, path_str, vec_real, aug_vecs = res
+            if vec_real is not None:
+                extracted_features.append(res)
+            completed += 1
+            if completed % batch_size == 0 or completed == len(tasks):
+                logger.info(f"Progreso extracción Re-ID: {completed}/{len(tasks)} procesadas.")
 
-    # 3. Fase Reduce y Augmentación Sintética
-    from collections import defaultdict
+    # 3. Fase Reduce
     class_results = defaultdict(list)
-    for class_idx, img_path, vec, vec_clahe in extracted_features:
-        class_results[class_idx].append((img_path, vec, vec_clahe))
+    for img_global_id, class_idx, img_path, vec_real, aug_vectors in extracted_features:
+        class_results[class_idx].append((img_global_id, img_path, vec_real, aug_vectors))
 
-    X, y = [], []
-    total_accepted = total_augmented = total_synth = 0
+    real_X_list, real_y_list, real_img_ids_list = [], [], []
+    aug_dict = {}
+    img_paths_dict = {}
+    valid_class_names = []
 
-    for class_idx, class_name in enumerate(class_names):
-        results = class_results.get(class_idx, [])
-        total_real = len(results)
-        
-        if total_real == 0:
-            logger.warning(f"Sin vectores válidos para la clase Re-ID '{class_name}', se omite.")
+    for old_class_idx, class_name in enumerate(class_names_all):
+        results = class_results.get(old_class_idx, [])
+        if len(results) < 10:
+            logger.warning(f"Sin suficientes vectores válidos para la clase Re-ID '{class_name}', se omite.")
             continue
 
-        for img_path, vec, vec_clahe in results:
-            X.append(vec)
-            y.append(class_idx)
-            total_accepted += 1
-            if vec_clahe is not None:
-                X.append(vec_clahe)
-                y.append(class_idx)
-                total_augmented += 1
+        valid_class_names.append(class_name)
+        new_class_idx = len(valid_class_names) - 1
 
-        if 0 < total_real < MIN_SAMPLES_FOR_AUGMENTATION:
-            needed = MIN_SAMPLES_FOR_AUGMENTATION - total_real
-            logger.info(f"Clase Re-ID '{class_name}': {total_real} muestras → generando {needed} sintéticas.")
-            base_img = cv2.imread(str(results[0][0])) # Cargar primera imagen para augmentación
-            synth_ok = 0
-            for synth_img in augmenter.generate_synthetic_samples(base_img, n_samples=needed):
-                vec_synth = _extract_reid_vector(synth_img)
-                if vec_synth is not None:
-                    X.append(vec_synth)
-                    y.append(class_idx)
-                    synth_ok += 1
-            total_synth += synth_ok
-            logger.info(f"  → {synth_ok}/{needed} sintéticas incorporadas.")
+        for img_global_id, img_path, vec_real, aug_vectors in results:
+            real_X_list.append(vec_real)
+            real_y_list.append(new_class_idx)
+            real_img_ids_list.append(img_global_id)
+            aug_dict[img_global_id] = aug_vectors
+            img_paths_dict[img_global_id] = img_path
 
-    logger.info("-" * 60)
-    logger.info("RESUMEN GLOBAL DATASET RE-ID:")
-    logger.info(f"  [OK] Muestras directas     : {total_accepted}")
-    logger.info(f"  [AUG] Variantes de ilum.   : {total_augmented}")
-    logger.info(f"  [SYN] Muestras sintéticas  : {total_synth}")
-    logger.info("-" * 60)
+        logger.info(f"[{class_name}] -> {len(results)} imágenes reales (+{len(results)*2} variantes fotométricas).")
 
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.int64)
+    real_X = np.array(real_X_list, dtype=np.float32)
+    real_y = np.array(real_y_list, dtype=np.int64)
+    real_img_ids = np.array(real_img_ids_list, dtype=np.int64)
 
     # Caching
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(CACHE_PATH, X=X, y=y, class_names=class_names)
+    np.savez_compressed(
+        CACHE_PATH,
+        real_X=real_X,
+        real_y=real_y,
+        real_img_ids=real_img_ids,
+        aug_dict=np.array(aug_dict, dtype=object),
+        img_paths_dict=np.array(img_paths_dict, dtype=object),
+        class_names=valid_class_names
+    )
     logger.info(f"Características Re-ID guardadas en caché: {CACHE_PATH}")
 
-    return X, y, class_names
+    return real_X, real_y, real_img_ids, aug_dict, img_paths_dict, valid_class_names
 
 
 def main():
+    from sklearn.svm import LinearSVC
     augmenter = DataAugmentationEngine()
-    X, y, class_names = build_dataset(augmenter)
-    logger.info(f"Dataset Re-ID construido: {X.shape[0]} muestras, {len(class_names)} clases. Dimensión vector: {X.shape[1]}")
+    real_X, real_y, real_img_ids, aug_dict, img_paths_dict, class_names = build_dataset(augmenter)
+    logger.info(f"Dataset Re-ID construido: {real_X.shape[0]} imágenes reales x {real_X.shape[1]} dimensiones, {len(class_names)} clases.")
 
-    class_weights = compute_class_weights(y)
-    cv_runner = CrossValidationRunner(method="kfold", n_splits=5)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     best_c = 1.0
     best_result = None
 
-    # Búsqueda rápida de hiperparámetro C
+    # Búsqueda de hiperparámetro C mediante 5-Fold CV Fold-Aware (Zero Data Leakage)
     for c_val in [0.1, 1.0, 10.0]:
-        model_test = SVC(kernel="linear", C=c_val, class_weight=class_weights, probability=False)
-        cv_res = cv_runner.evaluate(model_test, X, y)
-        logger.info(f"Evaluación C={c_val}: accuracy={cv_res.mean_accuracy:.4f}, f1_macro={cv_res.mean_f1_macro:.4f}")
+        fold_accuracies = []
+        fold_f1_scores = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(real_X, real_y)):
+            # 1. Construir conjunto de entrenamiento del Fold con Augmentation fotométrica
+            X_train_fold, y_train_fold = [], []
+
+            for idx in train_idx:
+                X_train_fold.append(real_X[idx])
+                cls = real_y[idx]
+                y_train_fold.append(cls)
+                img_id = int(real_img_ids[idx])
+                for aug_vec in aug_dict.get(img_id, []):
+                    X_train_fold.append(aug_vec)
+                    y_train_fold.append(cls)
+
+            # 2. Conjunto de validación del Fold: 100% PURO sobre imágenes reales
+            X_val_fold = real_X[val_idx]
+            y_val_fold = real_y[val_idx]
+
+            X_train_arr = np.array(X_train_fold, dtype=np.float32)
+            y_train_arr = np.array(y_train_fold, dtype=np.int64)
+
+            fold_model = LinearSVC(C=c_val, class_weight="balanced", dual=False, max_iter=2000, random_state=42)
+            fold_model.fit(X_train_arr, y_train_arr)
+
+            preds = fold_model.predict(X_val_fold)
+            fold_accuracies.append(accuracy_score(y_val_fold, preds))
+            fold_f1_scores.append(f1_score(y_val_fold, preds, average="macro", zero_division=0))
+
+        cv_res = CrossValidationResult(
+            mean_accuracy=float(np.mean(fold_accuracies)),
+            mean_f1_macro=float(np.mean(fold_f1_scores)),
+            fold_scores=fold_accuracies
+        )
+        logger.info(f"Evaluación Fold-Aware C={c_val}: accuracy={cv_res.mean_accuracy:.4f}, f1_macro={cv_res.mean_f1_macro:.4f}")
+
         if best_result is None or cv_res.mean_f1_macro > best_result.mean_f1_macro:
             best_result = cv_res
             best_c = c_val
@@ -194,9 +234,24 @@ def main():
         logger.error("El modelo Re-ID NO cumple el umbral mínimo de calidad. No se guardará.")
         return
 
-    final_model = SVC(kernel="linear", C=best_c, class_weight=class_weights, probability=False)
-    final_model.fit(X, y)
+    # Entrenamiento del modelo final con todos los datos y augmentación completa
+    X_full, y_full = [], []
+    for idx in range(len(real_X)):
+        X_full.append(real_X[idx])
+        cls = real_y[idx]
+        y_full.append(cls)
+        img_id = int(real_img_ids[idx])
+        for aug_vec in aug_dict.get(img_id, []):
+            X_full.append(aug_vec)
+            y_full.append(cls)
 
+    X_full = np.array(X_full, dtype=np.float32)
+    y_full = np.array(y_full, dtype=np.int64)
+
+    final_model = LinearSVC(C=best_c, class_weight="balanced", dual=False, max_iter=2000, random_state=42)
+    final_model.fit(X_full, y_full)
+
+    OUTPUT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     save_pickle({"model": final_model, "class_names": class_names}, OUTPUT_MODEL_PATH)
     logger.info(f"Modelo SVM Re-ID optimizado guardado en: {OUTPUT_MODEL_PATH}")
 

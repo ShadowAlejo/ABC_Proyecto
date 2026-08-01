@@ -34,7 +34,7 @@ class SVMReidModel:
         pred_idx = int(self.model.predict(features)[0])
         identity = self.class_names[pred_idx] if pred_idx < len(self.class_names) else str(pred_idx)
 
-        return identity, margin
+        return identity, margin_gap
 
     def fit(self, X: np.ndarray, y: np.ndarray, class_weight: str | dict = "balanced", C: float = 1.0) -> None:
         self.model = SVC(kernel="linear", C=C, class_weight=class_weight, probability=False)

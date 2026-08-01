@@ -131,11 +131,23 @@ class YuNetFaceDetector:
         was_recovered = False
         variant_used = "base"
 
-        # ── Etapa 2: cascada extendida de 8 variantes (early-exit) ─────────
+        # ── Etapa 2: cascada extendida de variantes con re-proyección inversa ───
         if not candidates:
-            for variant_name, variant_img in self._preprocessing_cascade(roi):
-                candidates = self._run_raw_detection(variant_img)
-                if candidates:
+            for variant_name, variant_img, scale_factor in self._preprocessing_cascade(roi):
+                raw_cands = self._run_raw_detection(variant_img)
+                if raw_cands:
+                    if scale_factor != 1.0:
+                        inv_s = 1.0 / scale_factor
+                        rescaled = []
+                        for bbox, conf, landmarks in raw_cands:
+                            x, y, fw, fh = bbox
+                            rescaled_bbox = (x * inv_s, y * inv_s, fw * inv_s, fh * inv_s)
+                            rescaled_landmarks = (landmarks * inv_s).astype(np.float32)
+                            rescaled.append((rescaled_bbox, conf, rescaled_landmarks))
+                        candidates = rescaled
+                    else:
+                        candidates = raw_cands
+
                     logger.debug(f"Rostro recuperado con variante '{variant_name}'.")
                     was_recovered = True
                     variant_used = variant_name
@@ -171,48 +183,50 @@ class YuNetFaceDetector:
     # ------------------------------------------------------------------ #
     # Cascada extendida de preprocesamiento (solo para entrenamiento)
     # ------------------------------------------------------------------ #
-    def _preprocessing_cascade(self, roi: np.ndarray) -> Iterator[Tuple[str, np.ndarray]]:
-        """Genera variantes del ROI en orden de invasividad creciente.
-        detect_training() para al primer intento que produzca candidatos (early-exit).
+    def _preprocessing_cascade(self, roi: np.ndarray) -> Iterator[Tuple[str, np.ndarray, float]]:
+        """Genera variantes del ROI en orden de invasividad creciente con factores de escala moderados.
+        Devuelve (nombre_variante, imagen_variante, factor_de_escala).
         """
+        h, w = roi.shape[:2]
+        is_small = min(h, w) < 128
+
         # 1. CLAHE — iluminación desigual / bajo contraste local
-        yield "clahe", self._apply_clahe(roi)
+        yield "clahe", self._apply_clahe(roi), 1.0
 
         # 2. Gamma oscuro (γ=0.45) — sobreexposición / imagen lavada
-        yield "gamma_dark", self._apply_gamma(roi, gamma=0.45)
+        yield "gamma_dark", self._apply_gamma(roi, gamma=0.45), 1.0
 
         # 3. Gamma claro (γ=1.9) — subexposición / imagen muy oscura
-        yield "gamma_bright", self._apply_gamma(roi, gamma=1.9)
+        yield "gamma_bright", self._apply_gamma(roi, gamma=1.9), 1.0
 
         # 4. Unsharp mask — desenfoque / baja nitidez
-        yield "unsharp", self._apply_unsharp_mask(roi)
+        yield "unsharp", self._apply_unsharp_mask(roi), 1.0
 
         # 5. Bilateral filter — imagen con ruido, preservando bordes faciales
-        yield "bilateral", self._apply_bilateral(roi)
+        yield "bilateral", self._apply_bilateral(roi), 1.0
 
-        # 6. CLAHE + multiscale — iluminación deficiente Y rostro pequeño
+        # 6. CLAHE + multiscale moderado — iluminación deficiente Y rostro pequeño
         clahe_img = self._apply_clahe(roi)
-        for scale in [1.5, 2.0, 0.75]:
-            h, w = clahe_img.shape[:2]
+        scales_to_try = [1.25, 1.5, 0.75] if is_small else [0.75]
+        for scale in scales_to_try:
             nw, nh = int(w * scale), int(h * scale)
-            if 10 <= nw <= 4000 and 10 <= nh <= 4000:
+            if 16 <= nw <= 2048 and 16 <= nh <= 2048:
                 yield f"clahe_scale_{scale}", cv2.resize(
                     clahe_img, (nw, nh), interpolation=cv2.INTER_LINEAR
-                )
+                ), scale
 
-        # 7. Multiscale puro — rostro pequeño sin problema de iluminación
-        for scale in [1.5, 2.0, 3.0, 0.75]:
-            h, w = roi.shape[:2]
+        # 7. Multiscale puro acotado — rostro pequeño sin problema de iluminación
+        for scale in scales_to_try:
             nw, nh = int(w * scale), int(h * scale)
-            if 10 <= nw <= 4000 and 10 <= nh <= 4000:
+            if 16 <= nw <= 2048 and 16 <= nh <= 2048:
                 yield f"scale_{scale}", cv2.resize(
                     roi, (nw, nh), interpolation=cv2.INTER_LINEAR
-                )
+                ), scale
 
         # 8. Gamma claro + unsharp — caso extremo: imagen oscura Y borrosa
         yield "gamma_bright_unsharp", self._apply_unsharp_mask(
             self._apply_gamma(roi, gamma=1.9)
-        )
+        ), 1.0
 
     # ------------------------------------------------------------------ #
     # Detección base
@@ -222,29 +236,43 @@ class YuNetFaceDetector:
         if h < 10 or w < 10:
             return []
 
+        scale = 1.0
+        max_dim = 1280
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            proc_w, proc_h = int(w * scale), int(h * scale)
+            proc_image = cv2.resize(image, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
+        else:
+            proc_image = image
+            proc_w, proc_h = w, h
+
         with self._lock:
-            self.detector.setInputSize((w, h))
-            _, faces = self.detector.detect(image)
+            self.detector.setInputSize((proc_w, proc_h))
+            _, faces = self.detector.detect(proc_image)
 
         if faces is None or len(faces) == 0:
             return []
 
         candidates = []
+        inv_scale = 1.0 / scale
         for f in faces:
-            x, y, fw, fh = f[0:4]
-            landmarks = f[4:14].reshape(5, 2)
+            x = float(f[0] * inv_scale)
+            y = float(f[1] * inv_scale)
+            fw = float(f[2] * inv_scale)
+            fh = float(f[3] * inv_scale)
+            landmarks = (f[4:14].reshape(5, 2) * inv_scale).astype(np.float32)
             confidence = float(f[-1])
             candidates.append(((x, y, fw, fh), confidence, landmarks))
         return candidates
 
     def _retry_multiscale(self, roi: np.ndarray) -> List[tuple]:
-        """Reintenta la detección escalando la imagen (recupera rostros muy pequeños o muy grandes)."""
-        scales = [1.5, 2.0, 0.75]
+        """Reintenta la detección escalando la imagen de forma acotada."""
         h, w = roi.shape[:2]
+        scales = [1.25, 1.5, 0.75] if min(h, w) < 128 else [0.75]
 
         for scale in scales:
             new_w, new_h = int(w * scale), int(h * scale)
-            if new_w < 10 or new_h < 10 or new_w > 4000 or new_h > 4000:
+            if new_w < 16 or new_h < 16 or new_w > 2048 or new_h > 2048:
                 continue
 
             resized = cv2.resize(roi, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
