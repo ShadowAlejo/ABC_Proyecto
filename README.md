@@ -30,23 +30,19 @@ Sistema inteligente en tiempo real y offline para **Identificación Facial (ID)*
                          └────────────┬────────────┘
                                       │
                          ┌────────────▼────────────┐
-                         │  ByteTrack / DeepSORT   │
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
                          │ Face Visibility Router  │
                          └──────┬───────────┬──────┘
-       (YuNet Conf ≥ 0.40)      │           │ (YuNet Conf < 0.40)
+       (YoloFace Conf ≥ 0.60)   │           │ (YoloFace Conf < 0.60)
                   ┌─────────────┘           └─────────────┐
                   ▼                                       ▼
        ┌─────────────────────┐                 ┌─────────────────────┐
        │   Rama Facial (ID)  │                 │  Rama Cuerpo (ReID) │
        ├─────────────────────┤                 ├─────────────────────┤
-       │ - Crop facial 64x64 │                 │ - BBox Silueta 128x256│
+       │ - YoloFace landmarks│                 │ - BBox Silueta 128x256│
        │ - CLAHE + Unsharp   │                 │ - Grid 4x8 (32 bloques)│
        │ - Descriptor HOG    │                 │ - LBP-U Fino (R=1, P=8) │
        │ - Calibrated SVM    │                 │ - Hellinger (L1-sqrt)│
-       │ - (Out-of-Core Memmap)│                 │ - Calibrated LinearSVC│
+       │ - (Out-of-Core)     │                 │ - Calibrated LinearSVC│
        └──────────┬──────────┘                 └──────────┬──────────┘
                   └─────────────┬─────────────────────────┘
                                 │
@@ -62,17 +58,15 @@ Sistema inteligente en tiempo real y offline para **Identificación Facial (ID)*
 ```
 
 ### Componentes Clave:
-1. **Detección y Tracking**:
+1. **Detección Stateless**:
    - **YOLOv8n**: Detecta cajas delimitadoras de personas (`person`, confianza $\ge 0.40$).
-   - **ByteTrack / DeepSORT**: Asigna e intercala identificadores temporales estables (`track_id`).
+   - **ID Efímeros**: Asignación instantánea de identificadores sin inercia temporal (`F{frame}_D{idx}`).
 2. **Ruteo Dinámico y Extraición (`face_visibility_router`)**:
-   - **Rama ID (Facial)**: Activada cuando YuNet detecta rostro con confianza $\ge 0.40$. Extrae descriptores HOG con normalización iterativa. El entrenamiento subyacente maneja +100,000 vectores usando **Out-of-Core Processing (`np.memmap`)** para no desbordar la memoria RAM. El clasificador es un `CalibratedClassifierCV` que provee Platt Scaling perfecto.
-   - **Rama Re-ID (Corporal)**: Fallback automático y robusto al cambio de ropa. Mantiene la silueta completa a $128 \times 256$, divide en 32 bloques y extrae patrones LBP-U aplicando **Normalización Hellinger (L1-sqrt)**. Su vector comprimido de **1,888 dimensiones** permite entrenar un SVC lineal súper veloz 100% en memoria. Ambas ramas emplean **Double-Checked Locking (`threading.Lock`)** para garantizar concurrencia Thread-Safe sin cuellos de botella.
+   - **Rama ID (Facial)**: Activada cuando YoloFace detecta rostro con confianza $\ge 0.60$. Extrae descriptores HOG con normalización iterativa y alineación biométrica de 5 landmarks. El entrenamiento subyacente maneja +100,000 vectores usando **Out-of-Core Processing (`np.memmap`)**. El clasificador es un `CalibratedClassifierCV` que provee Platt Scaling perfecto.
+   - **Rama Re-ID (Corporal)**: Fallback automático y robusto al cambio de ropa. Mantiene la silueta completa a $128 \times 256$, divide en 32 bloques y extrae patrones LBP-U aplicando **Normalización Hellinger (L1-sqrt)**. Su vector comprimido de **1,888 dimensiones** permite entrenar un SVC lineal súper veloz 100% en memoria.
 3. **Motor de Decisión (`decision_engine`)**:
-   - **`WeightedVotingInertia`**: Inercia temporal de votación ponderada con factor de decaimiento (0.98) y **Laplace Smoothing**.
    - **`ThresholdAcceptanceGate`**: Umbral crítico de aceptación ($T = 0.65$).
-   - **`Exclusión Mutua`**: Resuelve colisiones en tiempo real robando identidades a tracks de menor confianza.
-   - **`TrackIdentityState`**: Preserva la identidad cuando el sujeto pierde visibilidad facial.
+   - **`Exclusión Mutua`**: Resuelve colisiones intra-fotograma asegurando que cada identidad solo pueda ser asignada a la detección de mayor confianza.
 4. **Captura Dinámica (`dynamic_capture`)**:
    - Filtra y guarda imágenes de alta calidad (hasta 75 por ID) evaluando resolución, nitidez Laplaciana, intervalo temporal y desplazamiento postural.
 
@@ -128,13 +122,13 @@ id_reid_system/
 │   ├── raw_images/        # Imágenes de entrenamiento por sujeto
 │   └── raw_videos/        # Videos de entrada para inferencia
 ├── decision_engine/       # Votación temporal, umbral de aceptación e inercia
-├── detection_tracking/    # Detectores YOLOv8n y adaptadores ByteTrack / DeepSORT
+├── detection_tracking/    # Detectores YOLOv8n
 ├── dynamic_capture/       # Filtros de calidad para recolección de muestras
 ├── evaluation/            # Generadores de matrices de confusión, ROC y CMC
 ├── feature_extraction/    # Extracción de características HOG (cara) y LBP-U (cuerpo)
 │   ├── body/              # Torso isolator, masking sigmoideo, LBP multi-escala
-│   └── face/              # YuNet detector, normalizador, HOG, calidad facial
-├── models/                # Pesos base descargados (e.g. face_detection_yunet.onnx)
+│   └── face/              # YoloFace detector, normalizador, HOG, calidad facial
+├── models/                # Pesos base (e.g. yolov8n-face.pt)
 ├── preprocessing/         # Filtros de imagen (CLAHE, White-Patch, Anti-aliasing)
 ├── reports/               # Reportes de auditoría y métricas de evaluación
 ├── retraining/            # Augmentación, balanceo de clases y K-Fold CV
@@ -219,17 +213,12 @@ detection:
   conf_threshold: 0.40
   device: "cpu"                             # 'cpu' o 'cuda'
 
-tracking:
-  algorithm: "bytetrack"                    # 'bytetrack' o 'deepsort'
-  frame_rate: 30
-
 face:
-  yunet_model_path: "models/face_detection_yunet.onnx"
+  yoloface_model_path: "yolov8n-face.pt"
   conf_threshold: 0.60
 
 decision:
   t_aceptacion: 0.65                       # Umbral de aceptación (T_aceptación)
-  voting_decay: 0.98                       # Decaimiento de inercia temporal
 
 capture:
   base_dir: "dataset/captures"

@@ -7,17 +7,12 @@ detection:
   conf_threshold: 0.60
   device: "gpu"
 
-tracking:
-  algorithm: "bytetrack"  # bytetrack | deepsort
-  frame_rate: 30
-
 face:
-  yunet_model_path: "models/face_detection_yunet.onnx"
+  yoloface_model_path: "yolov8n-face.pt"
   conf_threshold: 0.75
 
 decision:
   t_aceptacion: 0.65
-  voting_decay: 0.98
 
 capture:
   base_dir: "dataset/captures"

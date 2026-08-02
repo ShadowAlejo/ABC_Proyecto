@@ -16,7 +16,7 @@ class CaptureTriggerEvaluator:
         self.temporal_filter = TemporalSamplingFilter()
         self.spatial_filter = SpatialPosturalFilter()
 
-    def maybe_capture(self, track_id: int, roi: np.ndarray, identity: str, frame_index: int,
+    def maybe_capture(self, track_id: str, roi: np.ndarray, identity: str, frame_index: int,
                        bbox: tuple | None = None) -> bool:
         """Evalúa todos los filtros en cascada y escribe la captura si todos aprueban."""
         if is_unknown(identity):

@@ -8,7 +8,7 @@ Modos:
 from dataclasses import dataclass
 import cv2
 import numpy as np
-from feature_extraction.face.yunet_face_detector import FaceDetectionResult
+from feature_extraction.face.yoloface_detector import FaceDetectionResult
 
 # ── Umbrales modo INFERENCIA (tiempo real) ──────────────────────────────────
 INF_MIN_FACE_WIDTH_PX      = 32

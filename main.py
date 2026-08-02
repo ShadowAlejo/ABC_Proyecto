@@ -20,17 +20,6 @@ from detection_tracking.yolov8n_detector import YOLOv8nDetector
 logger = get_logger("main")
 
 
-def build_tracker(config: dict):
-    algorithm = config.get("tracking", {}).get("algorithm", "bytetrack")
-    frame_rate = config.get("tracking", {}).get("frame_rate", 30)
-
-    if algorithm == "bytetrack":
-        from detection_tracking.bytetrack_adapter import ByteTrackAdapter
-        return ByteTrackAdapter(frame_rate=frame_rate)
-    elif algorithm == "deepsort":
-        from detection_tracking.deepsort_adapter import DeepSORTAdapter
-        return DeepSORTAdapter()
-    raise ValueError(f"Algoritmo de tracking no soportado: {algorithm}")
 
 
 def draw_overlay(frame, results):
@@ -59,8 +48,7 @@ def run_classic(config: dict):
         conf_threshold=config["detection"]["conf_threshold"],
         device=config["detection"]["device"],
     )
-    tracker = build_tracker(config)
-    orchestrator = PipelineOrchestrator(detector=detector, tracker=tracker)
+    orchestrator = PipelineOrchestrator(detector=detector)
 
     scheduler = FrameScheduler(target_fps=config["video"]["target_fps"])
     source = config["video"]["source"]

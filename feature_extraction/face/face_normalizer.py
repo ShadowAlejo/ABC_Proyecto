@@ -7,7 +7,7 @@ Pipeline de normalización (Similarity Transform Rígido):
 """
 import cv2
 import numpy as np
-from feature_extraction.face.yunet_face_detector import FaceDetectionResult
+from feature_extraction.face.yoloface_detector import FaceDetectionResult
 
 PADDING_RATIO = 0.15
 

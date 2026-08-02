@@ -7,7 +7,7 @@ import cv2
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
+from feature_extraction.face.yoloface_detector import YoloFaceDetector
 from feature_extraction.face.face_quality_validator import validate_face_quality
 from utils.file_io_helpers import list_files, ensure_dir
 from utils.logger import get_logger
@@ -20,7 +20,7 @@ IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
 def main():
-    detector = YuNetFaceDetector()
+    detector = YoloFaceDetector()
     ensure_dir(REPORT_DIR)
 
     rows = []

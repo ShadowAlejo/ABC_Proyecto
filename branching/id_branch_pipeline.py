@@ -1,6 +1,6 @@
 """Composicion secuencial: normalizador facial -> HOG+LBP -> SVM facial (rama de identificacion)."""
 import numpy as np
-from feature_extraction.face.yunet_face_detector import YuNetFaceDetector, FaceDetectionResult
+from feature_extraction.face.yoloface_detector import YoloFaceDetector, FaceDetectionResult
 from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from classification.svm_facial_model import SVMFacialModel
@@ -8,14 +8,14 @@ from feature_extraction.face.face_quality_validator import validate_face_quality
 
 import threading
 
-_face_detector: YuNetFaceDetector | None = None
+_face_detector: YoloFaceDetector | None = None
 _svm_facial: SVMFacialModel | None = None
 _id_lock = threading.Lock()
 
-def _get_face_detector() -> YuNetFaceDetector:
+def _get_face_detector() -> YoloFaceDetector:
     global _face_detector
     if _face_detector is None:
-        _face_detector = YuNetFaceDetector()
+        _face_detector = YoloFaceDetector()
     return _face_detector
 
 

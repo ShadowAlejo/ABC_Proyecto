@@ -69,7 +69,6 @@ dataset/cache/*
 
 # ------------------------------------------------------------
 # Pesos de modelos y serializaciones (.pkl, .pt, .onnx, .dat)
-# Se conserva el detector YuNet por ser un modelo base ligero
 # ------------------------------------------------------------
 models/*
 dataset/models/*
@@ -83,7 +82,7 @@ dataset/models/*
 *.dat
 *.npz
 
-!models/face_detection_yunet.onnx
+!yolov8n-face.pt
 
 # ------------------------------------------------------------
 # Registros y reportes generados en tiempo de ejecución

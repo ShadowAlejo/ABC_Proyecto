@@ -1,21 +1,30 @@
 """Funcion de decision pura: evalua la deteccion y calidad facial para conmutar a rama ID o Re-ID."""
 from typing import Literal
 import numpy as np
-from feature_extraction.face.yunet_face_detector import YuNetFaceDetector, FaceDetectionResult
+from feature_extraction.face.yoloface_detector import YoloFaceDetector, FaceDetectionResult
 from feature_extraction.face.face_quality_validator import validate_face_quality
+from utils.logger import get_logger
+from utils.config_loader import ConfigLoader
+
+logger = get_logger(__name__)
 
 Branch = Literal["ID", "REID"]
 
 # Umbral mínimo de confianza para detección facial en inferencia
 MIN_FACE_ROUTING_CONF = 0.50
 
-_face_detector: YuNetFaceDetector | None = None
+_face_detector: YoloFaceDetector | None = None
 
 
-def _get_face_detector() -> YuNetFaceDetector:
+def _get_face_detector() -> YoloFaceDetector:
     global _face_detector
     if _face_detector is None:
-        _face_detector = YuNetFaceDetector()
+        model_path = ConfigLoader.get("face.yoloface_model_path", "yolov8n-face.pt")
+        conf_threshold = ConfigLoader.get("face.conf_threshold", 0.60)
+        _face_detector = YoloFaceDetector(
+            model_path=model_path,
+            conf_threshold=conf_threshold
+        )
     return _face_detector
 
 

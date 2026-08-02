@@ -18,7 +18,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from classification.subspace_facial_ensemble import SubspaceFacialEnsemble
-from feature_extraction.face.yunet_face_detector import YuNetFaceDetector
+from feature_extraction.face.yoloface_detector import YoloFaceDetector
 from feature_extraction.face.face_normalizer import normalize_face
 from feature_extraction.face.hog_extractor import extract_hog_features
 from feature_extraction.face.face_quality_validator import validate_face_quality
@@ -58,7 +58,7 @@ def extract_worker(task_info: tuple[int, Path, int, Path]):
         scale = max_dim / max(h, w)
         img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-    detector = YuNetFaceDetector()
+    detector = YoloFaceDetector()
     det_res = detector.detect_training(img_bgr)
     if not det_res.detected or det_res.landmarks is None or det_res.bbox is None:
         return start_idx, False
