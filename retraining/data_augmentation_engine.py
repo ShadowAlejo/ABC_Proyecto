@@ -74,21 +74,21 @@ class DataAugmentationEngine:
         noisy = np.clip(noisy, 0, 255).astype(np.uint8)
         return apply_white_patch(noisy)
 
-    def generate_reid_photometric_samples(self, image: np.ndarray, n_samples: int = 5) -> List[np.ndarray]:
-        """Genera muestras sintéticas para Re-ID corporal SIN rotaciones para preservar bandas LBP.
+    def generate_reid_geometric_samples(self, image: np.ndarray, n_samples: int = 5) -> List[np.ndarray]:
+        """Genera muestras sintéticas geométricas para Re-ID corporal LBP.
         
-        Aplica variaciones cromáticas (White-Patch), ajustes de contraste adaptativo (CLAHE) y
-        escalados/traslaciones sutiles estrictamente verticales.
+        Aplica variaciones espaciales puras: Flip horizontal, traslación sutil, 
+        escalado y Random Erasing (Oclusión del 10%). Ignora fotometría.
         """
         synthetic = []
         h, w = image.shape[:2]
         center = (w / 2, h / 2)
 
         for _ in range(n_samples):
-            # Escala y traslación sutil (SIN rotación)
-            scale = np.random.uniform(0.97, 1.03)
-            tx = np.random.uniform(-0.02, 0.02) * w
-            ty = np.random.uniform(-0.02, 0.02) * h
+            # Escala y traslación sutil
+            scale = np.random.uniform(0.95, 1.05)
+            tx = np.random.uniform(-0.05, 0.05) * w
+            ty = np.random.uniform(-0.05, 0.05) * h
 
             matrix = cv2.getRotationMatrix2D(center, 0.0, scale)
             matrix[0, 2] += tx
@@ -96,23 +96,19 @@ class DataAugmentationEngine:
 
             aug = cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REFLECT_101)
 
-            # Perturbación fotométrica (White-Patch + CLAHE LAB aleatorio)
-            aug_wp = self._random_white_patch_variation(aug)
-            lab = cv2.cvtColor(aug_wp, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clip_limit = float(np.random.uniform(1.5, 3.0))
-            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-            l_clahe = clahe.apply(l)
-            
-            # Ganancia sutil de brillo en luminancia
-            l_gain = float(np.random.uniform(0.92, 1.08))
-            l_final = np.clip(l_clahe.astype(np.float32) * l_gain, 0, 255).astype(np.uint8)
-            
-            aug_final = cv2.cvtColor(cv2.merge((l_final, a, b)), cv2.COLOR_LAB2BGR)
-            synthetic.append(aug_final)
+            # 50% de probabilidad de Flip Horizontal
+            if np.random.rand() > 0.5:
+                aug = cv2.flip(aug, 1)
+
+            # Oclusión (Random Erasing 10% aprox)
+            # Area total es w*h, 10% es 0.1 * w * h. Como es un cuadrado, lado es sqrt(0.1*w*h)
+            fill_val = [128, 128, 128]
+            side = int(np.sqrt(0.10 * w * h))
+            if side > 5:
+                y = np.random.randint(0, max(1, h - side))
+                x = np.random.randint(0, max(1, w - side))
+                aug[y:y+side, x:x+side] = fill_val
+
+            synthetic.append(aug)
 
         return synthetic
-
-    def generate_synthetic_samples(self, image: np.ndarray, n_samples: int = 5) -> List[np.ndarray]:
-        """Alias retrocompatible: redirige a augmentación fotométrica sin rotación para Re-ID."""
-        return self.generate_reid_photometric_samples(image, n_samples=n_samples)

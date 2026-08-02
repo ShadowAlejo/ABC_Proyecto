@@ -42,13 +42,12 @@ Sistema inteligente en tiempo real y offline para **Identificación Facial (ID)*
        ┌─────────────────────┐                 ┌─────────────────────┐
        │   Rama Facial (ID)  │                 │  Rama Cuerpo (ReID) │
        ├─────────────────────┤                 ├─────────────────────┤
-       │ - Crop facial 64x64 │                 │ - Torso ROI 64x128  │
-       │ - CLAHE + Unsharp   │                 │ - WhitePatch+CLAHE  │
-       │ - Descriptor HOG    │                 │ - Máscara Sigmoidea │
-       │ - SVM Linear Facial │                 │ - LBP-U Multi-escala│
-       └──────────┬──────────┘                 │ - Norm L2 Global    │
-                  │                            │ - SVM Linear Re-ID  │
-                  │                            └──────────┬──────────┘
+       │ - Crop facial 64x64 │                 │ - BBox Silueta 128x256│
+       │ - CLAHE + Unsharp   │                 │ - Grid 4x8 (32 bloques)│
+       │ - Descriptor HOG    │                 │ - LBP-U Fino (R=1, P=8) │
+       │ - Calibrated SVM    │                 │ - Hellinger (L1-sqrt)│
+       │ - (Out-of-Core Memmap)│                 │ - Calibrated LinearSVC│
+       └──────────┬──────────┘                 └──────────┬──────────┘
                   └─────────────┬─────────────────────────┘
                                 │
                          ┌──────▼──────┐
@@ -66,13 +65,13 @@ Sistema inteligente en tiempo real y offline para **Identificación Facial (ID)*
 1. **Detección y Tracking**:
    - **YOLOv8n**: Detecta cajas delimitadoras de personas (`person`, confianza $\ge 0.40$).
    - **ByteTrack / DeepSORT**: Asigna e intercala identificadores temporales estables (`track_id`).
-2. **Ruteo Dinámico (`face_visibility_router`)**:
-   - **Rama ID (Facial)**: Activada cuando YuNet detecta rostro con confianza $\ge 0.40$. Utiliza `detect_training()` con una cascada de 8 variantes de preprocesamiento (CLAHE, Gamma) para máxima robustez y total concordancia con la fase de entrenamiento. Extrae vector HOG y predice con el SVM Facial.
-   - **Rama Re-ID (Corporal)**: Fallback automático cuando el rostro está ocluido, en perfil severo, o cuando la confianza del SVM Facial cae por debajo de 0.65. Recorta el torso a $64 \times 128$, aplica máscara sigmoidea, extrae descriptores LBP-U y predice con el SVM Re-ID.
+2. **Ruteo Dinámico y Extraición (`face_visibility_router`)**:
+   - **Rama ID (Facial)**: Activada cuando YuNet detecta rostro con confianza $\ge 0.40$. Extrae descriptores HOG con normalización iterativa. El entrenamiento subyacente maneja +100,000 vectores usando **Out-of-Core Processing (`np.memmap`)** para no desbordar la memoria RAM. El clasificador es un `CalibratedClassifierCV` que provee Platt Scaling perfecto.
+   - **Rama Re-ID (Corporal)**: Fallback automático y robusto al cambio de ropa. Mantiene la silueta completa a $128 \times 256$, divide en 32 bloques y extrae patrones LBP-U aplicando **Normalización Hellinger (L1-sqrt)**. Su vector comprimido de **1,888 dimensiones** permite entrenar un SVC lineal súper veloz 100% en memoria. Ambas ramas emplean **Double-Checked Locking (`threading.Lock`)** para garantizar concurrencia Thread-Safe sin cuellos de botella.
 3. **Motor de Decisión (`decision_engine`)**:
-   - **`WeightedVotingInertia`**: Inercia temporal de votación ponderada con factor de decaimiento (0.98) y **Laplace Smoothing** para prevenir identidades espurias cuando la persona se voltea.
+   - **`WeightedVotingInertia`**: Inercia temporal de votación ponderada con factor de decaimiento (0.98) y **Laplace Smoothing**.
    - **`ThresholdAcceptanceGate`**: Umbral crítico de aceptación ($T = 0.65$).
-   - **`Exclusión Mutua`**: Resuelve colisiones en tiempo real. Si dos tracks reclaman la misma identidad, la más alta prevalece y la otra es forzada a `"Desconocido"`.
+   - **`Exclusión Mutua`**: Resuelve colisiones en tiempo real robando identidades a tracks de menor confianza.
    - **`TrackIdentityState`**: Preserva la identidad cuando el sujeto pierde visibilidad facial.
 4. **Captura Dinámica (`dynamic_capture`)**:
    - Filtra y guarda imágenes de alta calidad (hasta 75 por ID) evaluando resolución, nitidez Laplaciana, intervalo temporal y desplazamiento postural.
@@ -169,16 +168,16 @@ python scripts/audit_face_dataset.py
 
 ### 2. Entrenamiento de Modelos SVM
 
-#### A. Entrenar el SVM Facial (Rama ID)
-Procesa las imágenes faciales, aplica la cascada de preprocesamiento extendida, augmentación sintética, 5-Fold Cross Validation y guarda el modelo:
+#### A. Entrenar el SVM Facial (Rama ID - Out-Of-Core)
+Procesa masivamente el dataset dividiéndolo en subespacios corporales y volcando la aumentación paralela directamente a disco mediante arreglos mapeados (`np.memmap`) implementando **Zero Data Leakage CV**.
 
 ```bash
 python scripts/train_facial_svm.py
 ```
 > Modelo guardado en: `dataset/models/svm_facial/svm_facial_model.pkl`
 
-#### B. Entrenar el SVM Re-ID (Rama Corporal)
-Aísla el torso, aplica filtrado cromático, genera vectores LBP multi-escala con normalización $L_2$, evalúa regularizaciones $C \in \{0.1, 1.0, 10.0\}$ y guarda el modelo:
+#### B. Entrenar el SVM Re-ID (Rama Corporal - Hellinger)
+Captura la silueta de $128 \times 256$, inyecta aumentación estrictamente geométrica (Flips, Cutout, Scaling) y comprime la malla LBP a 1,888 características robustas antes de compilar el Pipeline en RAM.
 
 ```bash
 python scripts/train_reid_svm.py

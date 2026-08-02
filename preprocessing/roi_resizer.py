@@ -4,7 +4,7 @@ import numpy as np
 from preprocessing.antialiasing_filter import apply_antialiasing
 
 FACE_CANONICAL_SIZE = (64, 64)   # (width, height)
-BODY_CANONICAL_SIZE = (64, 128)  # (width, height)
+BODY_CANONICAL_SIZE = (128, 256)  # (width, height)
 
 
 def resize_roi(roi: np.ndarray, target_size: tuple[int, int], apply_smoothing: bool = True) -> np.ndarray:

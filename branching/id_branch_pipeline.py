@@ -6,9 +6,11 @@ from feature_extraction.face.hog_extractor import extract_hog_features
 from classification.svm_facial_model import SVMFacialModel
 from feature_extraction.face.face_quality_validator import validate_face_quality
 
+import threading
+
 _face_detector: YuNetFaceDetector | None = None
 _svm_facial: SVMFacialModel | None = None
-
+_id_lock = threading.Lock()
 
 def _get_face_detector() -> YuNetFaceDetector:
     global _face_detector
@@ -20,8 +22,11 @@ def _get_face_detector() -> YuNetFaceDetector:
 def _get_svm_facial() -> SVMFacialModel:
     global _svm_facial
     if _svm_facial is None:
-        _svm_facial = SVMFacialModel()
-        _svm_facial.load()
+        with _id_lock:
+            if _svm_facial is None:
+                temp_model = SVMFacialModel()
+                temp_model.load()
+                _svm_facial = temp_model
     return _svm_facial
 
 

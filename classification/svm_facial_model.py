@@ -32,14 +32,7 @@ class SVMFacialModel:
         proba = self.model.predict_proba(feature_tuple)[0]
         
         max_idx = int(np.argmax(proba))
-        
-        # Calcular margin_gap (diferencia entre top-1 y top-2) para calibrar probabilidad
-        sorted_proba = np.sort(proba)
-        margin_gap = float(sorted_proba[-1] - sorted_proba[-2]) if len(sorted_proba) >= 2 else float(sorted_proba[-1])
-        
-        # Calibrar probabilidad logistica escalada (scale=6.0 para espacio 15 clases)
-        from classification.logistic_confidence_converter import decision_margin_to_probability
-        calibrated_prob = decision_margin_to_probability(margin_gap, scale=6.0)
+        calibrated_prob = float(proba[max_idx])
 
         identity = self.class_names[max_idx] if max_idx < len(self.class_names) else str(max_idx)
         return identity, calibrated_prob

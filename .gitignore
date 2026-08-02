@@ -68,7 +68,7 @@ dataset/cache/*
 *.webp
 
 # ------------------------------------------------------------
-# Pesos de modelos y serializaciones (.pkl, .pt, .onnx)
+# Pesos de modelos y serializaciones (.pkl, .pt, .onnx, .dat)
 # Se conserva el detector YuNet por ser un modelo base ligero
 # ------------------------------------------------------------
 models/*
@@ -80,6 +80,8 @@ dataset/models/*
 *.h5
 *.tflite
 *.onnx
+*.dat
+*.npz
 
 !models/face_detection_yunet.onnx
 
