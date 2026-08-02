@@ -237,29 +237,45 @@ def main():
     logger.info(f"F1-Macro CV Global (Zero Data Leakage): {mean_f1:.4f}")
 
     if mean_f1 >= 0.80:
-        logger.info("Entrenando modelo final con 100% de datos en modo Mini-Batch...")
+        logger.info("Entrenando modelo final con 100% de datos en modo Mini-Batch (25 épocas)...")
         all_train_mask = (mm_y != -1)
         all_train_indices = np.where(all_train_mask)[0]
-        np.random.shuffle(all_train_indices)
         
         final_model = SubspaceFacialEnsemble()
-        batch_size = 32000
+        batch_size = 4096
         n_batches = len(all_train_indices) // batch_size + (1 if len(all_train_indices) % batch_size != 0 else 0)
         
+        # Ajustar primero scalers
+        for b in range(n_batches):
+            b_idx = all_train_indices[b*batch_size : (b+1)*batch_size]
+            final_model.scaler_global.partial_fit(mm_g[b_idx])
+            final_model.scaler_upper.partial_fit(mm_u[b_idx])
+            final_model.scaler_lower.partial_fit(mm_l[b_idx])
+
+        epochs = 25
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore")
-            for b in range(n_batches):
-                b_idx = all_train_indices[b*batch_size : (b+1)*batch_size]
-                X_batch_tuple = (mm_g[b_idx], mm_u[b_idx], mm_l[b_idx])
-                y_batch = mm_y[b_idx]
-                final_model.partial_fit(X_batch_tuple, y_batch, classes=np.unique(group_y))
+            for epoch in range(epochs):
+                np.random.shuffle(all_train_indices)
+                for b in range(n_batches):
+                    b_idx = all_train_indices[b*batch_size : (b+1)*batch_size]
+                    X_batch_tuple = (mm_g[b_idx], mm_u[b_idx], mm_l[b_idx])
+                    y_batch = mm_y[b_idx]
+                    
+                    X_g_s = final_model.scaler_global.transform(X_batch_tuple[0])
+                    X_u_s = final_model.scaler_upper.transform(X_batch_tuple[1])
+                    X_l_s = final_model.scaler_lower.transform(X_batch_tuple[2])
+                    
+                    final_model.svm_global.partial_fit(X_g_s, y_batch, classes=np.unique(group_y))
+                    final_model.svm_upper.partial_fit(X_u_s, y_batch, classes=np.unique(group_y))
+                    final_model.svm_lower.partial_fit(X_l_s, y_batch, classes=np.unique(group_y))
 
         real_mask = mm_real & (mm_y != -1)
         real_indices = np.where(real_mask)[0]
         X_calib = (mm_g[real_indices], mm_u[real_indices], mm_l[real_indices])
         y_calib = mm_y[real_indices]
         
-        logger.info("Ajustando calibrador de probabilidades (Platt Scaling)...")
+        logger.info("Ajustando calibrador de probabilidades...")
         final_model.calibrate(X_calib, y_calib)
 
         preds_final = final_model.predict(X_calib)

@@ -44,11 +44,14 @@ def validate_face_quality(roi: np.ndarray,
                        del dataset (menor nitidez mínima, menor tamaño mínimo,
                        mayor tolerancia de ángulo). No afecta la inferencia RT.
     """
-    # Selección de umbrales según modo
-    min_w      = TRN_MIN_FACE_WIDTH_PX      if training_mode else INF_MIN_FACE_WIDTH_PX
-    min_h      = TRN_MIN_FACE_HEIGHT_PX     if training_mode else INF_MIN_FACE_HEIGHT_PX
-    min_sharp  = TRN_MIN_SHARPNESS_VARIANCE if training_mode else INF_MIN_SHARPNESS_VARIANCE
-    max_yaw    = TRN_MAX_YAW_ASYMMETRY      if training_mode else INF_MAX_YAW_ASYMMETRY
+    # Selección de umbrales según modo y confianza de detección
+    high_conf = face_result.confidence >= 0.75
+
+    min_w = TRN_MIN_FACE_WIDTH_PX if (training_mode or high_conf) else INF_MIN_FACE_WIDTH_PX
+    min_h = TRN_MIN_FACE_HEIGHT_PX if (training_mode or high_conf) else INF_MIN_FACE_HEIGHT_PX
+    min_sharp = 6.0 if high_conf else (TRN_MIN_SHARPNESS_VARIANCE if training_mode else INF_MIN_SHARPNESS_VARIANCE)
+    min_brightness = 25.0 if high_conf else 35.0
+    max_yaw = 0.75 if high_conf else (TRN_MAX_YAW_ASYMMETRY if training_mode else INF_MAX_YAW_ASYMMETRY)
 
     reasons = []
 
@@ -75,8 +78,8 @@ def validate_face_quality(roi: np.ndarray,
     gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY) if face_crop.ndim == 3 else face_crop
     
     brightness = float(np.mean(gray)) if gray.size > 0 else 0.0
-    if brightness <= 35.0:
-        reasons.append(f"rostro_muy_oscuro (brillo={brightness:.1f}, min=35.0)")
+    if brightness < min_brightness:
+        reasons.append(f"rostro_muy_oscuro (brillo={brightness:.1f}, min={min_brightness})")
 
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var()) if gray.size > 1 else 0.0
     if sharpness < min_sharp:
@@ -86,7 +89,7 @@ def validate_face_quality(roi: np.ndarray,
     if not pose_ok:
         reasons.append("pose_muy_lateral_o_landmarks_incoherentes")
 
-    is_valid = size_ok and (brightness > 35.0) and (sharpness >= min_sharp) and pose_ok
+    is_valid = size_ok and (brightness >= min_brightness) and (sharpness >= min_sharp) and pose_ok
     return FaceQualityReport(is_valid=is_valid, reasons=reasons, sharpness=sharpness,
                               size_ok=size_ok, pose_ok=pose_ok)
 

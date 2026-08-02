@@ -58,38 +58,35 @@ class PipelineOrchestrator:
         # Limpiar registro en cada frame (Stateless)
         self.registry.clear_all()
 
-        # 1. Extracción secuencial de ROIs y Padding
+        # 1. Extracción secuencial de ROIs y Padding Homogéneo
         rois = []
         is_enhanced_list = []
+        offsets_list = []
         for track in ephemeral_tracks:
-            roi, is_enhanced = enhance_far_distance_roi(frame, track.bbox)
+            roi, is_enhanced, offsets = enhance_far_distance_roi(frame, track.bbox)
             rois.append(roi)
             is_enhanced_list.append(is_enhanced)
-            
+            offsets_list.append(offsets)
+
         # 2. Inferencia Facial Batch (GPU/CPU Unificado)
         face_detector = _get_face_detector()
         face_results = face_detector.detect_batch(rois, is_enhanced_list)
-        
+
         # 3. Procesamiento y Clasificación Secuencial (CPU rápida)
         raw_results: List[TrackResult] = []
-        
+
         for track, roi, is_enhanced, face_res in zip(ephemeral_tracks, rois, is_enhanced_list, face_results):
             if roi is None or roi.size == 0:
                 continue
-                
+
             branch, face_conf, face_result = route_branch_with_result(roi, face_res)
 
             if branch == "ID":
                 identity, raw_confidence = run_id_branch(roi, face_result=face_result)
-                # Fallback a Re-ID
-                if raw_confidence < self.gate.t_aceptacion:
-                    reid_identity, reid_confidence = run_reid_branch(roi)
-                    if reid_confidence > raw_confidence and reid_identity != "Desconocido":
-                        identity = reid_identity
-                        raw_confidence = reid_confidence
-                        branch = "REID"
-            else:
+            elif branch == "REID":
                 identity, raw_confidence = run_reid_branch(roi)
+            else:
+                identity, raw_confidence = label_unknown(), 0.0
 
             # Clasificación instantánea sin inercia
             accepted = self.gate.accept(raw_confidence)

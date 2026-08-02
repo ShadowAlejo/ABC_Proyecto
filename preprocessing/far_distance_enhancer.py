@@ -7,77 +7,95 @@ from typing import Optional, Tuple
 import numpy as np
 import cv2
 
-# Umbral por defecto: si el recorte original (YOLO) mide menos de 120 px de alto,
-# el sujeto está lo suficientemente lejos como para ameritar el pipeline de restauración profunda.
-FAR_DISTANCE_HEIGHT_THRESHOLD = 120
+# Umbrales de Histéresis para detección a distancia
+FAR_THRESHOLD_LOW = 100    # Por debajo de 100px: Activa restauración profunda
+FAR_THRESHOLD_HIGH = 140   # Por encima de 140px: Desactiva restauración profunda
 
-# Tamaño canónico esperado por el extractor corporal (Re-ID LBP)
-CANONICAL_SIZE = (128, 256)
+_last_enhancement_state: dict[int, bool] = {}
 
-def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FAR_DISTANCE_HEIGHT_THRESHOLD) -> Tuple[Optional[np.ndarray], bool]:
-    """Extrae un ROI de la imagen original con padding. Si la persona está lejos, aplica
-    una restauración algorítmica profunda antes de retornar la matriz.
+
+def enhance_far_distance_roi(
+    frame: np.ndarray,
+    bbox: tuple,
+    track_id: Optional[int] = None,
+    threshold_low: int = FAR_THRESHOLD_LOW,
+    threshold_high: int = FAR_THRESHOLD_HIGH,
+) -> Tuple[Optional[np.ndarray], bool, Tuple[int, int]]:
+    """Extrae un ROI de la imagen original con padding asimétrico uniforme.
     
+    Aplica restauración algorítmica proporcional si la persona está a gran distancia,
+    usando histéresis (100-140px) para evitar oscilaciones de confianza entre fotogramas.
+
     Args:
         frame: Imagen BGR original de alta resolución.
         bbox: Coordenadas de la detección de YOLO (x1, y1, x2, y2).
-        threshold: Umbral en píxeles de altura para activar la restauración.
-        
+        track_id: Identificador del track para mantener la memoria de histéresis.
+        threshold_low: Umbral inferior de activación.
+        threshold_high: Umbral superior de desactivación.
+
     Returns:
-        Tupla (roi_extraido, is_enhanced) donde is_enhanced es True si se le aplicó CLAHE.
+        Tupla (roi_extraido, is_enhanced, (pad_x, pad_top))
     """
     x1, y1, x2, y2 = [int(v) for v in bbox]
     frame_h, frame_w = frame.shape[:2]
-    
+
     # Prevenir cajas invertidas o fuera de rango
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(frame_w, x2), min(frame_h, y2)
-    
+
     w = x2 - x1
     h = y2 - y1
-    
+
     if w <= 0 or h <= 0:
-        return None, False
-        
-    # 1. Expansión Contextual Adaptativa (Padding Dinámico del 15%)
-    # Esto se aplica SIEMPRE para no mutilar rostros
+        return None, False, (0, 0)
+
+    # 1. Expansión Contextual Adaptativa Homogénea (Padding Asimétrico)
+    # +25% superior para preservar frente/cabeza, +15% lateral, +10% inferior
     pad_x = int(w * 0.15)
-    pad_y = int(h * 0.15)
-    
+    pad_top = int(h * 0.25)
+    pad_bottom = int(h * 0.10)
+
     x1_pad = max(0, x1 - pad_x)
-    y1_pad = max(0, y1 - pad_y)
+    y1_pad = max(0, y1 - pad_top)
     x2_pad = min(frame_w, x2 + pad_x)
-    y2_pad = min(frame_h, y2 + pad_y)
-    
+    y2_pad = min(frame_h, y2 + pad_bottom)
+
     roi_padded = frame[y1_pad:y2_pad, x1_pad:x2_pad].copy()
     if roi_padded.size == 0:
-        return None, False
+        return None, False, (0, 0)
 
-    # 2. Discriminador de Escala y Distancia
-    if h >= threshold:
-        # Bypass: Si la persona está cerca, pasa el ROI con padding directo sin latencia de CLAHE
-        return roi_padded, False
-        
-    # 3. Reconstrucción Espacial por Interpolación Lanczos-4
-    # Escala el recorte expandido de baja resolución directo a la rejilla del clasificador Re-ID
-    resized_roi = cv2.resize(roi_padded, CANONICAL_SIZE, interpolation=cv2.INTER_LANCZOS4)
-    
+    actual_pad_x = x1 - x1_pad
+    actual_pad_top = y1 - y1_pad
+    offsets = (actual_pad_x, actual_pad_top)
+
+    # 2. Discriminador con Histéresis de Escala
+    prev_state = _last_enhancement_state.get(track_id, False) if track_id is not None else False
+    if h < threshold_low:
+        should_enhance = True
+    elif h > threshold_high:
+        should_enhance = False
+    else:
+        should_enhance = prev_state
+
+    if track_id is not None:
+        _last_enhancement_state[track_id] = should_enhance
+
+    if not should_enhance:
+        return roi_padded, False, offsets
+
+    # 3. Restauración Proporcional (Preservando relación de aspecto natural)
     # 3.1. Reenfoque de Frecuencias (Unsharp Masking Adaptativo)
-    # Suavizamos y restamos al original para extraer los bordes (costuras, texturas) de alta frecuencia
-    blurred = cv2.GaussianBlur(resized_roi, (0, 0), 2.0)
-    unsharp = cv2.addWeighted(resized_roi, 1.5, blurred, -0.5, 0)
-    
+    blurred = cv2.GaussianBlur(roi_padded, (0, 0), 1.5)
+    unsharp = cv2.addWeighted(roi_padded, 1.4, blurred, -0.4, 0)
+
     # 4. Normalización Fotométrica Regional (CLAHE en Espacio LAB)
     lab = cv2.cvtColor(unsharp, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
-    
-    # Ecualización sobre la luminancia localizada
+
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     l_clahe = clahe.apply(l_channel)
-    
-    # Fusionamos de vuelta y pasamos a BGR
+
     lab_clahe = cv2.merge((l_clahe, a_channel, b_channel))
     enhanced_roi = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2BGR)
-    
-    # 5. Re-Inyección al Pipeline
-    return enhanced_roi, True
+
+    return enhanced_roi, True, offsets

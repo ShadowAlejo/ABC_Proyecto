@@ -69,26 +69,11 @@ class SubspaceFacialEnsemble:
         return self.partial_fit(X_tuple, y, classes=np.unique(y))
 
     def calibrate(self, X_tuple: tuple[np.ndarray, np.ndarray, np.ndarray], y: np.ndarray):
-        """Calibra las probabilidades reales (Platt Scaling) tras entrenar."""
-        X_g, X_u, X_l = X_tuple
-        X_g_scaled = self.scaler_global.transform(np.asarray(X_g, dtype=np.float32))
-        X_u_scaled = self.scaler_upper.transform(np.asarray(X_u, dtype=np.float32))
-        X_l_scaled = self.scaler_lower.transform(np.asarray(X_l, dtype=np.float32))
-        y_arr = np.asarray(y, dtype=np.int64)
-
-        self.calibrated_global = CalibratedClassifierCV(self.svm_global, cv="prefit", method="sigmoid")
-        self.calibrated_global.fit(X_g_scaled, y_arr)
-
-        self.calibrated_upper = CalibratedClassifierCV(self.svm_upper, cv="prefit", method="sigmoid")
-        self.calibrated_upper.fit(X_u_scaled, y_arr)
-
-        self.calibrated_lower = CalibratedClassifierCV(self.svm_lower, cv="prefit", method="sigmoid")
-        self.calibrated_lower.fit(X_l_scaled, y_arr)
-
+        """Mantenido para compatibilidad de API (las probabilidades provienen de modified_huber)."""
         return self
 
     def predict_proba(self, X_tuple: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
-        """Devuelve la distribución de probabilidad fusionada por pesos con Early-Stopping."""
+        """Devuelve la distribución de probabilidad fusionada por pesos (Global 40%, Superior 35%, Inferior 25%)."""
         X_g, X_u, X_l = X_tuple
         X_g = np.asarray(X_g, dtype=np.float32)
         X_u = np.asarray(X_u, dtype=np.float32)
@@ -99,28 +84,16 @@ class SubspaceFacialEnsemble:
             X_u = X_u.reshape(1, -1)
             X_l = X_l.reshape(1, -1)
 
-        # Evaluar primero la SVM Global (Early-Stopping)
+        # Evaluar primero la SVM Global
         X_g_scaled = self.scaler_global.transform(X_g)
-        if self.calibrated_global is not None:
-            p_g = self.calibrated_global.predict_proba(X_g_scaled)
-        else:
-            p_g = self.svm_global.predict_proba(X_g_scaled)
-
-        # Early-Stopping: Si la probabilidad Top-1 Global > 0.90, omitir SVMs regionales
-        max_prob_g = np.max(p_g, axis=1)
-        if np.all(max_prob_g > 0.90):
-            return p_g
+        p_g = self.svm_global.predict_proba(X_g_scaled)
 
         # Evaluar SVMs regionales
         X_u_scaled = self.scaler_upper.transform(X_u)
         X_l_scaled = self.scaler_lower.transform(X_l)
 
-        if self.calibrated_upper is not None:
-            p_u = self.calibrated_upper.predict_proba(X_u_scaled)
-            p_l = self.calibrated_lower.predict_proba(X_l_scaled)
-        else:
-            p_u = self.svm_upper.predict_proba(X_u_scaled)
-            p_l = self.svm_lower.predict_proba(X_l_scaled)
+        p_u = self.svm_upper.predict_proba(X_u_scaled)
+        p_l = self.svm_lower.predict_proba(X_l_scaled)
 
         # Fusión ponderada: Global (40%), Superior (35%), Inferior (25%)
         return 0.40 * p_g + 0.35 * p_u + 0.25 * p_l

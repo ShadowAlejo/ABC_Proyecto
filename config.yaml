@@ -9,7 +9,7 @@ detection:
 
 face:
   yoloface_model_path: "yolov8n-face.pt"
-  conf_threshold: 0.75
+  conf_threshold: 0.50
 
 decision:
   t_aceptacion: 0.65
