@@ -1,0 +1,34 @@
+video:
+  source: "dataset/raw_videos/Video Camara 1.mov"  # o 0 para cámara web / cualquier video en dataset/raw_videos
+  target_fps: 30
+
+detection:
+  yolo_model_path: "yolov8m.pt"
+  conf_threshold: 0.60
+  device: "gpu"
+
+decision:
+  t_aceptacion: 0.80
+  voting_decay: 0.98
+
+capture:
+  base_dir: "dataset/captures"
+  max_captures_per_track: 75
+  sharpness_threshold: 100.0
+  min_frame_interval: 5
+  min_width: 40
+  min_height: 80
+
+models:
+  svm_facial_path: "dataset/models/svm_facial/svm_facial_model.pkl"
+  svm_reid_path: "dataset/models/svm_reid/svm_reid_model.pkl"
+
+retraining:
+  historical_ratio: 0.3
+  cross_validation_method: "kfold"
+  n_splits: 5
+  min_improvement: 0.01
+  min_absolute_f1: 0.75
+
+evaluation:
+  output_dir: "reports"

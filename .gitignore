@@ -1,0 +1,113 @@
+# ============================================================
+#  Sistema de Identificación (ID) y Re-identificación (Re-ID)
+#  .gitignore — mantiene el repositorio en código fuente puro
+# ============================================================
+
+# ------------------------------------------------------------
+# Entorno virtual y temporales de Python
+# ------------------------------------------------------------
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dll
+*.pyd
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ------------------------------------------------------------
+# Carpetas temporales y clones locales
+# ------------------------------------------------------------
+_yolox_tmp/
+YOLOX/
+tmp/
+scratch/
+.gemini/
+.antigravity/
+
+# ------------------------------------------------------------
+# Datasets y archivos multimedia
+# (Ignora contenido de las carpetas conservando los .gitkeep)
+# ------------------------------------------------------------
+dataset/raw_images/*
+dataset/raw_videos/*
+dataset/processed/*
+dataset/captures/*
+dataset/hard_negatives/*
+dataset/cache/*
+
+!dataset/raw_images/.gitkeep
+!dataset/raw_videos/.gitkeep
+!dataset/processed/.gitkeep
+!dataset/captures/.gitkeep
+!dataset/hard_negatives/.gitkeep
+!dataset/models/.gitkeep
+
+# Exclusión general de formatos multimedia pesados
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+
+# ------------------------------------------------------------
+# Pesos de modelos y serializaciones (.pkl, .pt, .onnx, .dat)
+# Se conserva el detector YuNet por ser un modelo base ligero
+# ------------------------------------------------------------
+models/*
+dataset/models/*
+*.pkl
+*.pt
+*.pth
+*.joblib
+*.h5
+*.tflite
+*.onnx
+*.dat
+*.npz
+
+!models/face_detection_yunet.onnx
+
+# ------------------------------------------------------------
+# Registros y reportes generados en tiempo de ejecución
+# ------------------------------------------------------------
+logs/
+reports/
+*.log
+
+# ------------------------------------------------------------
+# Configuración local y variables de entorno
+# ------------------------------------------------------------
+config.local.yaml
+.env
+.env.*
+
+# ------------------------------------------------------------
+# Editores de código y sistema operativo
+# ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
