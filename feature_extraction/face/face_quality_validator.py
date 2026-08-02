@@ -13,7 +13,7 @@ from feature_extraction.face.yoloface_detector import FaceDetectionResult
 # ── Umbrales modo INFERENCIA (tiempo real) ──────────────────────────────────
 INF_MIN_FACE_WIDTH_PX      = 32
 INF_MIN_FACE_HEIGHT_PX     = 32
-INF_MIN_SHARPNESS_VARIANCE = 25.0   # Laplaciano; rostros muy borrosos degradan el HoG.
+INF_MIN_SHARPNESS_VARIANCE = 12.0   # Laplaciano; bajado de 25.0 para tolerar motion blur de webcams.
 INF_MAX_YAW_ASYMMETRY      = 0.60   # Asimetría horizontal ojo-nariz (proxy de perfil extremo).
 
 # ── Umbrales modo ENTRENAMIENTO (más permisivos para maximizar muestras) ────
