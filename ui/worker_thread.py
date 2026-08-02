@@ -53,15 +53,7 @@ class PipelineWorker(QThread):
         self._stop_requested = True
         self._paused = False
 
-    # ------------------------------------------------------------------ helpers
-    def _build_tracker(self):
-        algorithm = self.config.get("tracking", {}).get("algorithm", "deepsort")
-        frame_rate = self.config.get("tracking", {}).get("frame_rate", 30)
-        if algorithm == "bytetrack":
-            from detection_tracking.bytetrack_adapter import ByteTrackAdapter
-            return ByteTrackAdapter(frame_rate=frame_rate)
-        from detection_tracking.deepsort_adapter import DeepSORTAdapter
-        return DeepSORTAdapter()
+
 
     @staticmethod
     def _draw_overlay(frame: np.ndarray, results) -> np.ndarray:
@@ -114,8 +106,7 @@ class PipelineWorker(QThread):
                 conf_threshold=self.config["detection"]["conf_threshold"],
                 device=self.config["detection"]["device"],
             )
-            tracker = self._build_tracker()
-            orchestrator = PipelineOrchestrator(detector=detector, tracker=tracker)
+            orchestrator = PipelineOrchestrator(detector=detector)
             scheduler = FrameScheduler(target_fps=self.config["video"]["target_fps"])
         except Exception as exc:
             self.error_occurred.emit(f"Error al inicializar el pipeline: {exc}")

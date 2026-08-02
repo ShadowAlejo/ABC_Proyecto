@@ -13,6 +13,7 @@ from branching.reid_branch_pipeline import run_reid_branch
 from decision_engine.threshold_acceptance_gate import ThresholdAcceptanceGate
 from decision_engine.unknown_labeler import label_unknown
 from dynamic_capture.capture_trigger_evaluator import CaptureTriggerEvaluator
+from preprocessing.far_distance_enhancer import enhance_far_distance_roi
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -62,7 +63,7 @@ class PipelineOrchestrator:
         self.registry.clear_all()
 
         def _process_track(track: EphemeralTrack):
-            roi = self._crop_roi(frame, track.bbox)
+            roi = enhance_far_distance_roi(frame, track.bbox)
             if roi is None or roi.size == 0:
                 return None
 
@@ -125,14 +126,4 @@ class PipelineOrchestrator:
                 else:
                     res.identity = label_unknown()
 
-        return raw_results
-
-    @staticmethod
-    def _crop_roi(frame: np.ndarray, bbox: tuple) -> Optional[np.ndarray]:
-        x1, y1, x2, y2 = [int(v) for v in bbox]
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return frame[y1:y2, x1:x2].copy()
+        return raw_results

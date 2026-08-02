@@ -35,7 +35,7 @@ OUTPUT_MODEL_PATH = Path("dataset/models/svm_facial/svm_facial_model.pkl")
 MEMMAP_DIR = Path("dataset/cache/memmap")
 
 # Constantes de Extracción
-AUG_COUNT = 15
+AUG_COUNT = 20
 TOTAL_PER_IMAGE = 1 + AUG_COUNT
 DIMS_G = 1200
 DIMS_U = 1680
@@ -60,7 +60,7 @@ def extract_worker(task_info: tuple[int, Path, int, Path]):
 
     detector = YoloFaceDetector()
     det_res = detector.detect_training(img_bgr)
-    if not det_res.detected or det_res.landmarks is None or det_res.bbox is None:
+    if not det_res.detected or det_res.bbox is None:
         return start_idx, False
     
     q_report = validate_face_quality(img_bgr, det_res, training_mode=True)
@@ -99,7 +99,7 @@ def extract_worker(task_info: tuple[int, Path, int, Path]):
     augmenter = DataAugmentationEngine()
     for i in range(AUG_COUNT):
         curr_idx = start_idx + 1 + i
-        jittered_landmarks = augmenter.jitter_landmarks(det_res.landmarks, scale=0.02)
+        jittered_landmarks = augmenter.jitter_landmarks(det_res.landmarks, scale=0.02) if det_res.landmarks is not None else None
         aug_face, _ = normalize_face(img_bgr, det_res, custom_landmarks=jittered_landmarks)
         if aug_face is None:
             continue
@@ -261,6 +261,15 @@ def main():
         
         logger.info("Ajustando calibrador de probabilidades (Platt Scaling)...")
         final_model.calibrate(X_calib, y_calib)
+
+        preds_final = final_model.predict(X_calib)
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, balanced_accuracy_score
+        logger.info("=== Métricas Finales (Sobre datos Reales de Calibración) ===")
+        logger.info(f"Accuracy: {accuracy_score(y_calib, preds_final):.4f}")
+        logger.info(f"Precision (macro): {precision_score(y_calib, preds_final, average='macro', zero_division=0):.4f}")
+        logger.info(f"Recall (macro): {recall_score(y_calib, preds_final, average='macro', zero_division=0):.4f}")
+        logger.info(f"F1-Score (macro): {f1_score(y_calib, preds_final, average='macro', zero_division=0):.4f}")
+        logger.info(f"Balanced Accuracy: {balanced_accuracy_score(y_calib, preds_final):.4f}")
 
         OUTPUT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
         save_pickle({
