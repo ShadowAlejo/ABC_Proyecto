@@ -11,7 +11,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_FACE_CONF_THRESHOLD = 0.6
+DEFAULT_FACE_CONF_THRESHOLD = 0.50
 INTERNAL_DETECTOR_THRESHOLD = 0.40
 MIN_TRAINING_CONF = 0.25
 
@@ -41,14 +41,14 @@ class YoloFaceDetector:
         # Cargar modelo YOLO
         self.model = YOLO(model_path)
 
-    def detect(self, roi: np.ndarray) -> FaceDetectionResult:
+    def detect(self, roi: np.ndarray, is_enhanced: bool = False) -> FaceDetectionResult:
         """Inferencia tiempo real."""
         if roi is None or roi.size == 0:
             return FaceDetectionResult(bbox=None, confidence=0.0, detected=False)
 
         candidates = self._run_raw_detection(roi)
 
-        if not candidates and self.enable_contrast_retry:
+        if not candidates and self.enable_contrast_retry and not is_enhanced:
             candidates = self._run_raw_detection(self._apply_clahe(roi))
 
         if not candidates and self.enable_multiscale_retry:
@@ -57,7 +57,7 @@ class YoloFaceDetector:
         if not candidates:
             return FaceDetectionResult(bbox=None, confidence=0.0, detected=False)
 
-        valid_candidates = [c for c in candidates if self._passes_geometric_sanity(c)]
+        valid_candidates = [c for c in candidates if self._passes_geometric_sanity(c, c[1])]
         pool = valid_candidates if valid_candidates else candidates
 
         best_bbox, best_conf, best_landmarks = max(pool, key=lambda c: c[1])
@@ -70,6 +70,49 @@ class YoloFaceDetector:
             landmarks=best_landmarks,
             all_candidates=candidates,
         )
+
+    def detect_batch(self, rois: List[np.ndarray], is_enhanced_list: List[bool]) -> List[FaceDetectionResult]:
+        """Inferencia en lote (Batch Inference)."""
+        if not rois:
+            return []
+            
+        results = []
+        # TODO: A simple loop that calls detect for now, or true batching if needed.
+        # Since YOLOv8 supports list of images directly:
+        raw_results = self.model(rois, verbose=False)
+        
+        for i, (roi, r, is_enhanced) in enumerate(zip(rois, raw_results, is_enhanced_list)):
+            if roi is None or roi.size == 0:
+                results.append(FaceDetectionResult(bbox=None, confidence=0.0, detected=False))
+                continue
+                
+            candidates = self._parse_yolo_result(r, 1.0)
+            
+            if not candidates and self.enable_contrast_retry and not is_enhanced:
+                candidates = self._run_raw_detection(self._apply_clahe(roi))
+            
+            if not candidates and self.enable_multiscale_retry:
+                candidates = self._retry_multiscale(roi)
+                
+            if not candidates:
+                results.append(FaceDetectionResult(bbox=None, confidence=0.0, detected=False))
+                continue
+                
+            valid_candidates = [c for c in candidates if self._passes_geometric_sanity(c, c[1])]
+            pool = valid_candidates if valid_candidates else candidates
+            
+            best_bbox, best_conf, best_landmarks = max(pool, key=lambda c: c[1])
+            detected = best_conf >= self.conf_threshold
+            
+            results.append(FaceDetectionResult(
+                bbox=best_bbox,
+                confidence=best_conf,
+                detected=detected,
+                landmarks=best_landmarks,
+                all_candidates=candidates
+            ))
+            
+        return results
 
     def detect_training(self, roi: np.ndarray) -> FaceDetectionResult:
         """Cascada extendida de preprocesamiento para maximizar recall en entrenamiento."""
@@ -104,7 +147,7 @@ class YoloFaceDetector:
         if not candidates:
             return FaceDetectionResult(bbox=None, confidence=0.0, detected=False, was_recovered=False)
 
-        valid_candidates = [c for c in candidates if self._passes_geometric_sanity(c)]
+        valid_candidates = [c for c in candidates if self._passes_geometric_sanity(c, c[1])]
         pool = valid_candidates if valid_candidates else candidates
 
         best_bbox, best_conf, best_landmarks = max(pool, key=lambda c: c[1])
@@ -165,7 +208,9 @@ class YoloFaceDetector:
         if len(results) == 0:
             return []
             
-        result = results[0]
+        return self._parse_yolo_result(results[0], 1.0 / scale)
+
+    def _parse_yolo_result(self, result, inv_scale: float = 1.0) -> List[tuple]:
         boxes = result.boxes
         if boxes is None or len(boxes) == 0:
             return []
@@ -173,7 +218,6 @@ class YoloFaceDetector:
         keypoints = result.keypoints
 
         candidates = []
-        inv_scale = 1.0 / scale
         for i in range(len(boxes)):
             box = boxes[i].xyxy[0].cpu().numpy()
             conf = float(boxes[i].conf[0].cpu().numpy())
@@ -194,7 +238,7 @@ class YoloFaceDetector:
                     kpts = (kp_array[:5] * inv_scale).astype(np.float32)
 
             candidates.append(((rx, ry, rfw, rfh), conf, kpts))
-
+            
         return candidates
 
     def _retry_multiscale(self, roi: np.ndarray) -> List[tuple]:
@@ -244,7 +288,10 @@ class YoloFaceDetector:
         return cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
 
     @staticmethod
-    def _passes_geometric_sanity(candidate: tuple) -> bool:
+    def _passes_geometric_sanity(candidate: tuple, conf: float) -> bool:
+        if conf >= 0.75:
+            return True
+            
         bbox, _, landmarks = candidate
         _, _, fw, fh = bbox
 
@@ -254,7 +301,7 @@ class YoloFaceDetector:
         left_eye, right_eye, nose, mouth_left, mouth_right = landmarks
 
         eye_distance = np.linalg.norm(right_eye - left_eye)
-        if not (0.20 * fw <= eye_distance <= 0.75 * fw):
+        if not (0.15 * fw <= eye_distance <= 0.75 * fw):
             return False
 
         eyes_mid_y = (left_eye[1] + right_eye[1]) / 2.0
@@ -266,7 +313,7 @@ class YoloFaceDetector:
             return False
 
         aspect_ratio = fw / fh
-        if not (0.55 <= aspect_ratio <= 1.6):
+        if not (0.50 <= aspect_ratio <= 2.0):
             return False
 
         return True

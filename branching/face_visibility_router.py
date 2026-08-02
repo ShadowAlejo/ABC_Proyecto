@@ -29,7 +29,8 @@ def _get_face_detector() -> YoloFaceDetector:
 
 
 def route_branch(body_roi: np.ndarray,
-                 conf_threshold: float = MIN_FACE_ROUTING_CONF) -> tuple[Branch, float, FaceDetectionResult]:
+                 conf_threshold: float = MIN_FACE_ROUTING_CONF,
+                 is_enhanced: bool = False) -> tuple[Branch, float, FaceDetectionResult]:
     """
     Determina la rama activa (ID o REID) según la visibilidad y calidad facial [REQ-RID-01].
     - Si se detecta un rostro con calidad válida (no borroso, simetría frontal) -> Rama ID.
@@ -38,11 +39,19 @@ def route_branch(body_roi: np.ndarray,
     Returns:
         branch:      "ID" o "REID"
         face_conf:   confianza de la deteccion facial
-        face_result: resultado completo de YuNet
+        face_result: resultado completo de YuNet/YoloFace
     """
     detector = _get_face_detector()
-    result = detector.detect(body_roi)
+    result = detector.detect(body_roi, is_enhanced=is_enhanced)
 
+    return route_branch_with_result(body_roi, result, conf_threshold)
+
+def route_branch_with_result(body_roi: np.ndarray,
+                             result: FaceDetectionResult,
+                             conf_threshold: float = MIN_FACE_ROUTING_CONF) -> tuple[Branch, float, FaceDetectionResult]:
+    """
+    Toma un resultado de detección facial precalculado (útil para batch inference) y determina la rama.
+    """
     if result.detected and result.confidence >= conf_threshold:
         q_report = validate_face_quality(body_roi, result, training_mode=False)
         if q_report.is_valid:

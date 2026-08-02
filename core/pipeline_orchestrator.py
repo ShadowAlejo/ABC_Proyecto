@@ -3,11 +3,9 @@ motor de decisión y captura dinámica. Opera de forma Stateless (sin tracker)."
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import numpy as np
-import concurrent.futures
-
 from detection_tracking.yolov8n_detector import YOLOv8nDetector, Detection
 from detection_tracking.track_registry import TrackRegistry
-from branching.face_visibility_router import route_branch
+from branching.face_visibility_router import route_branch_with_result, _get_face_detector
 from branching.id_branch_pipeline import run_id_branch
 from branching.reid_branch_pipeline import run_reid_branch
 from decision_engine.threshold_acceptance_gate import ThresholdAcceptanceGate
@@ -43,11 +41,9 @@ class PipelineOrchestrator:
     registry: TrackRegistry = field(default_factory=TrackRegistry)
     gate: ThresholdAcceptanceGate = field(default_factory=ThresholdAcceptanceGate)
     capture_evaluator: CaptureTriggerEvaluator = field(default_factory=CaptureTriggerEvaluator)
-    executor: concurrent.futures.ThreadPoolExecutor = field(init=False)
 
     def __post_init__(self):
-        # i9-14900HX tiene 24 cores (8P+16E), 32 hilos. 16 workers es un buen balance para inferencia concurrente.
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=16)
+        pass
 
     def process_frame(self, frame: np.ndarray, frame_index: int) -> List[TrackResult]:
         # 1. Detección cruda
@@ -62,12 +58,26 @@ class PipelineOrchestrator:
         # Limpiar registro en cada frame (Stateless)
         self.registry.clear_all()
 
-        def _process_track(track: EphemeralTrack):
-            roi = enhance_far_distance_roi(frame, track.bbox)
+        # 1. Extracción secuencial de ROIs y Padding
+        rois = []
+        is_enhanced_list = []
+        for track in ephemeral_tracks:
+            roi, is_enhanced = enhance_far_distance_roi(frame, track.bbox)
+            rois.append(roi)
+            is_enhanced_list.append(is_enhanced)
+            
+        # 2. Inferencia Facial Batch (GPU/CPU Unificado)
+        face_detector = _get_face_detector()
+        face_results = face_detector.detect_batch(rois, is_enhanced_list)
+        
+        # 3. Procesamiento y Clasificación Secuencial (CPU rápida)
+        raw_results: List[TrackResult] = []
+        
+        for track, roi, is_enhanced, face_res in zip(ephemeral_tracks, rois, is_enhanced_list, face_results):
             if roi is None or roi.size == 0:
-                return None
-
-            branch, face_conf, face_result = route_branch(roi)
+                continue
+                
+            branch, face_conf, face_result = route_branch_with_result(roi, face_res)
 
             if branch == "ID":
                 identity, raw_confidence = run_id_branch(roi, face_result=face_result)
@@ -96,19 +106,16 @@ class PipelineOrchestrator:
                     frame_index=frame_index,
                 )
 
-            return TrackResult(
-                track_id=track.track_id,
-                bbox=track.bbox,
-                identity=final_identity,
-                confidence=raw_confidence,
-                branch_used=branch,
-                captured=captured,
+            raw_results.append(
+                TrackResult(
+                    track_id=track.track_id,
+                    bbox=track.bbox,
+                    identity=final_identity,
+                    confidence=raw_confidence,
+                    branch_used=branch,
+                    captured=captured,
+                )
             )
-
-        raw_results: List[TrackResult] = []
-        for res in self.executor.map(_process_track, ephemeral_tracks):
-            if res is not None:
-                raw_results.append(res)
                 
         # --- EXCLUSION MUTUA ---
         identity_to_track: Dict[str, TrackResult] = {}

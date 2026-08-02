@@ -3,7 +3,7 @@ Restaura recortes lejanos aplicando expansión contextual (padding adaptativo),
 interpolación espacial de alto grado (Lanczos-4), desenfoque de máscara (Unsharp Masking)
 y normalización fotométrica regional en el espacio LAB mediante CLAHE."""
 
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
 import cv2
 
@@ -14,8 +14,8 @@ FAR_DISTANCE_HEIGHT_THRESHOLD = 120
 # Tamaño canónico esperado por el extractor corporal (Re-ID LBP)
 CANONICAL_SIZE = (128, 256)
 
-def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FAR_DISTANCE_HEIGHT_THRESHOLD) -> Optional[np.ndarray]:
-    """Extrae un ROI de la imagen original. Si la persona está lejos, aplica
+def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FAR_DISTANCE_HEIGHT_THRESHOLD) -> Tuple[Optional[np.ndarray], bool]:
+    """Extrae un ROI de la imagen original con padding. Si la persona está lejos, aplica
     una restauración algorítmica profunda antes de retornar la matriz.
     
     Args:
@@ -24,7 +24,7 @@ def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FA
         threshold: Umbral en píxeles de altura para activar la restauración.
         
     Returns:
-        np.ndarray BGR con la región extraída (y potencialmente mejorada) o None.
+        Tupla (roi_extraido, is_enhanced) donde is_enhanced es True si se le aplicó CLAHE.
     """
     x1, y1, x2, y2 = [int(v) for v in bbox]
     frame_h, frame_w = frame.shape[:2]
@@ -37,14 +37,10 @@ def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FA
     h = y2 - y1
     
     if w <= 0 or h <= 0:
-        return None
+        return None, False
         
-    # 1. Discriminador de Escala y Distancia
-    if h >= threshold:
-        # Bypass: Si la persona está cerca, pasa directo sin latencia
-        return frame[y1:y2, x1:x2].copy()
-        
-    # 2. Expansión Contextual Adaptativa (Padding Dinámico del 15%)
+    # 1. Expansión Contextual Adaptativa (Padding Dinámico del 15%)
+    # Esto se aplica SIEMPRE para no mutilar rostros
     pad_x = int(w * 0.15)
     pad_y = int(h * 0.15)
     
@@ -55,7 +51,12 @@ def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FA
     
     roi_padded = frame[y1_pad:y2_pad, x1_pad:x2_pad].copy()
     if roi_padded.size == 0:
-        return None
+        return None, False
+
+    # 2. Discriminador de Escala y Distancia
+    if h >= threshold:
+        # Bypass: Si la persona está cerca, pasa el ROI con padding directo sin latencia de CLAHE
+        return roi_padded, False
         
     # 3. Reconstrucción Espacial por Interpolación Lanczos-4
     # Escala el recorte expandido de baja resolución directo a la rejilla del clasificador Re-ID
@@ -79,4 +80,4 @@ def enhance_far_distance_roi(frame: np.ndarray, bbox: tuple, threshold: int = FA
     enhanced_roi = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2BGR)
     
     # 5. Re-Inyección al Pipeline
-    return enhanced_roi
+    return enhanced_roi, True
